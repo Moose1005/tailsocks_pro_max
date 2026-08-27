@@ -16,11 +16,17 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.widget.Toast
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -48,6 +54,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -57,6 +64,7 @@ import java.lang.Runtime
 import io.github.bropines.tailscaled.ui.theme.TailSocksTheme
 
 fun isVersionNewer(current: String, latest: String): Boolean {
+    val isDev = current.contains("-dev", ignoreCase = true) || current.contains("dev", ignoreCase = true) || BuildConfig.DEBUG
     val cleanCurrent = current.removePrefix("v").substringBefore("-").replace(Regex("[^0-9.]"), "")
     val cleanLatest = latest.removePrefix("v").substringBefore("-").replace(Regex("[^0-9.]"), "")
     val c = cleanCurrent.split(".").map { it.toIntOrNull() ?: 0 }
@@ -67,7 +75,69 @@ fun isVersionNewer(current: String, latest: String): Boolean {
         if (lVal > cVal) return true
         if (lVal < cVal) return false
     }
+    // If base numeric versions are equal (e.g. 3.1.4-dev vs 3.1.4 release),
+    // a DEV/Debug build is inherently newer than the published release.
+    if (isDev) return false
     return false
+}
+
+fun launchApkInstaller(context: Context, apkFile: java.io.File) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+        Toast.makeText(context, context.getString(R.string.main_update_grant_perm), Toast.LENGTH_LONG).show()
+        try {
+            context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
+        } catch (e: Exception) {
+            context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES))
+        }
+        return
+    }
+
+    try {
+        val apkUri = androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            apkFile
+        )
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        context.startActivity(installIntent)
+    } catch (e: Exception) {
+        android.util.Log.e("MainActivity", "FileProvider install intent failed, falling back to PackageInstaller session", e)
+        try {
+            val packageInstaller = context.packageManager.packageInstaller
+            val params = android.content.pm.PackageInstaller.SessionParams(
+                android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL
+            )
+            val sessionId = packageInstaller.createSession(params)
+            val session = packageInstaller.openSession(sessionId)
+
+            session.openWrite("tailsocks_update", 0, apkFile.length()).use { output ->
+                apkFile.inputStream().use { input ->
+                    input.copyTo(output)
+                }
+                session.fsync(output)
+            }
+
+            val intent = Intent(context, MainActivity::class.java).apply {
+                action = "ACTION_INSTALL_COMPLETE"
+            }
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_MUTABLE
+            } else {
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val pendingIntent = android.app.PendingIntent.getActivity(context, 0, intent, flags)
+
+            session.commit(pendingIntent.intentSender)
+            session.close()
+        } catch (fallbackEx: Exception) {
+            Toast.makeText(context, "Installer failed: ${fallbackEx.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
 }
 
 fun downloadAndCacheAvatar(context: Context, accountId: String, urlStr: String) {
@@ -141,43 +211,55 @@ class MainActivity : ComponentActivity() {
         }
         if (currentLocale.language != targetLocale.language) {
             recreate()
+            return
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                if (appctr.Appctr.isRunning()) {
+                    appctr.Appctr.forceRefresh()
+                }
+            } catch (_: Exception) {}
         }
     }
 
     private fun handleIntent(intent: Intent?) {
-        if (intent?.action == "android.service.quicksettings.action.QS_TILE_PREFERENCES") {
-            showAccountSwitcher.value = true
-        }
+        // QS tile long press / preferences simply opens the app main screen without showing account switcher
     }
 
     private fun handleAppStartup() {
+        ProxyState.init(this)
         val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
         val appctrPrefs = getSharedPreferences("appctr", Context.MODE_PRIVATE)
         
-        try {
-            val packageInfo = packageManager.getPackageInfo(packageName, 0)
-            val currentUpdateTime = packageInfo.lastUpdateTime
-            val savedUpdateTime = prefs.getLong("last_update_time", 0)
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val packageInfo = packageManager.getPackageInfo(packageName, 0)
+                val currentUpdateTime = packageInfo.lastUpdateTime
+                val savedUpdateTime = prefs.getLong("last_update_time", 0)
 
-            if (savedUpdateTime != currentUpdateTime) {
-                Runtime.getRuntime().exec("killall tailscaled")
-                prefs.edit().putLong("last_update_time", currentUpdateTime).apply()
-            }
-        } catch (e: Exception) {}
-
-        val forceBg = appctrPrefs.getBoolean("force_bg", false)
-
-        if (ProxyState.isUserLetRunning(this) && !ProxyState.isActualRunning()) {
-            if (forceBg) {
-                val authKey = appctrPrefs.getString("authkey", "") ?: ""
-                if (authKey.isNotBlank()) {
-                    val intent = Intent(this, TailscaledService::class.java).apply { action = "START_ACTION" }
-                    ContextCompat.startForegroundService(this, intent)
-                } else {
-                    ProxyState.setUserState(this, false)
+                if (savedUpdateTime != currentUpdateTime) {
+                    Runtime.getRuntime().exec("killall tailscaled").waitFor()
+                    prefs.edit().putLong("last_update_time", currentUpdateTime).apply()
                 }
-            } else {
-                ProxyState.setUserState(this, false)
+            } catch (e: Exception) {}
+
+            val forceBg = appctrPrefs.getBoolean("force_bg", false)
+
+            if (ProxyState.isUserLetRunning(this@MainActivity) && !ProxyState.isActualRunning(this@MainActivity)) {
+                withContext(Dispatchers.Main) {
+                    if (forceBg) {
+                        val authKey = appctrPrefs.getString("authkey", "") ?: ""
+                        if (authKey.isNotBlank()) {
+                            val intent = Intent(this@MainActivity, TailscaledService::class.java).apply { action = "START_ACTION" }
+                            ContextCompat.startForegroundService(this@MainActivity, intent)
+                        } else {
+                            ProxyState.setUserState(this@MainActivity, false)
+                        }
+                    } else {
+                        ProxyState.setUserState(this@MainActivity, false)
+                    }
+                }
             }
         }
     }
@@ -213,7 +295,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
     val context = LocalContext.current
@@ -225,6 +307,10 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
     var showAddAccountDialog by remember { mutableStateOf(false) }
     var showRenameAccountDialog by remember { mutableStateOf(false) }
     var showSwitchConfirmDialog by remember { mutableStateOf<TailscaleAccount?>(null) }
+    var accountOptionsModal by remember { mutableStateOf<TailscaleAccount?>(null) }
+    var accountToDeleteConfirm by remember { mutableStateOf<TailscaleAccount?>(null) }
+    var accountToRename by remember { mutableStateOf<TailscaleAccount?>(null) }
+    var editingAccountId by remember { mutableStateOf<String?>(null) }
     
     var newAccountName by remember { mutableStateOf("") }
     var accountMenuExpanded by remember { mutableStateOf(false) }
@@ -253,8 +339,8 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
         }
     }
 
-    var proxyState by remember { mutableStateOf(if (ProxyState.isActualRunning()) "ACTIVE" else "STOPPED") }
-    var exitNodeIp by remember { mutableStateOf(prefs.getString("exit_node_ip", "") ?: "") }
+    var proxyState by remember { mutableStateOf(if (ProxyState.isActualRunning(context)) "ACTIVE" else "STOPPED") }
+    var exitNodeIp by remember(activeAccount.id) { mutableStateOf(prefs.getString("exit_node_ip", "") ?: "") }
 
     val profilePrefsListener = remember(activeAccount.id) {
         android.content.SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
@@ -314,7 +400,7 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
                     if (backendState == "NeedsLogin" || backendState == "NoState") {
                         loggedOutSeconds += 2
                         if (loggedOutSeconds >= 10) {
-                            if (prefs.getBoolean("was_logged_in", false)) {
+                            if (prefs.getBoolean("was_logged_in", false) && loginUrl.isNullOrBlank()) {
                                 "CONNECTION_ISSUE"
                             } else {
                                 "LOGGED_OUT"
@@ -449,21 +535,36 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
     }
 
     if (showAddAccountDialog) {
+        var newAccountServer by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { showAddAccountDialog = false },
             title = { Text(stringResource(R.string.main_add_account_title)) },
             text = {
-                OutlinedTextField(
-                    value = newAccountName,
-                    onValueChange = { newAccountName = it },
-                    label = { Text(stringResource(R.string.main_account_name_label)) },
-                    singleLine = true
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = newAccountName,
+                        onValueChange = { newAccountName = it },
+                        label = { Text(stringResource(R.string.main_account_name_label)) },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = newAccountServer,
+                        onValueChange = { newAccountServer = it },
+                        label = { Text(stringResource(R.string.settings_login_server_title)) },
+                        placeholder = { Text("https://controlplane.tailscale.com") },
+                        singleLine = true
+                    )
+                }
             },
             confirmButton = {
                 Button(onClick = {
                     if (newAccountName.isNotBlank()) {
                         val acc = AccountManager.addAccount(context, newAccountName)
+                        val accPrefs = context.getSharedPreferences("appctr_${acc.id}", Context.MODE_PRIVATE)
+                        accPrefs.edit().putBoolean("do_reset", true).apply()
+                        if (newAccountServer.isNotBlank()) {
+                            accPrefs.edit().putString("login_server", newAccountServer.trim()).apply()
+                        }
                         accounts.value = AccountManager.getAccounts(context)
                         AccountManager.setActiveAccount(context, acc.id)
                         activeAccount = acc
@@ -481,29 +582,154 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
     }
 
     if (showRenameAccountDialog) {
-        var renameText by remember { mutableStateOf(activeAccount.name) }
+        val targetAcc = accountToRename ?: activeAccount
+        var renameText by remember(targetAcc.id) { mutableStateOf(targetAcc.name) }
         AlertDialog(
-            onDismissRequest = { showRenameAccountDialog = false },
+            onDismissRequest = { 
+                showRenameAccountDialog = false
+                accountToRename = null
+            },
             title = { Text(stringResource(R.string.main_rename_account_title)) },
             text = {
                 OutlinedTextField(
                     value = renameText,
                     onValueChange = { renameText = it },
                     label = { Text(stringResource(R.string.main_new_name_label)) },
-                    singleLine = true
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
                 )
             },
             confirmButton = {
                 Button(onClick = {
                     if (renameText.isNotBlank()) {
-                        AccountManager.renameAccount(context, activeAccount.id, renameText)
+                        AccountManager.renameAccount(context, targetAcc.id, renameText)
                         accounts.value = AccountManager.getAccounts(context)
                         activeAccount = AccountManager.getActiveAccount(context)
                         showRenameAccountDialog = false
+                        accountToRename = null
                     }
                 }) { Text(stringResource(R.string.action_rename)) }
             },
-            dismissButton = { TextButton(onClick = { showRenameAccountDialog = false }) { Text(stringResource(R.string.action_cancel)) } }
+            dismissButton = { 
+                TextButton(onClick = { 
+                    showRenameAccountDialog = false
+                    accountToRename = null
+                }) { Text(stringResource(R.string.action_cancel)) } 
+            }
+        )
+    }
+
+    if (accountOptionsModal != null) {
+        val targetAcc = accountOptionsModal!!
+        AlertDialog(
+            onDismissRequest = { accountOptionsModal = null },
+            icon = { Icon(Icons.Default.ManageAccounts, null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text(targetAcc.name, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center) },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        stringResource(R.string.main_account_options_subtitle, targetAcc.name),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    
+                    if (targetAcc.id != activeAccount.id) {
+                        FilledTonalButton(
+                            onClick = {
+                                val accToSwitch = targetAcc
+                                accountOptionsModal = null
+                                accountMenuExpanded = false
+                                if (ProxyState.isActualRunning()) showSwitchConfirmDialog = accToSwitch
+                                else { 
+                                    AccountManager.setActiveAccount(context, accToSwitch.id)
+                                    activeAccount = accToSwitch 
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth().height(44.dp),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(Icons.Default.SwapHoriz, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(stringResource(R.string.main_switch_to_account), fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                    
+                    OutlinedButton(
+                        onClick = {
+                            accountToRename = targetAcc
+                            accountOptionsModal = null
+                            showRenameAccountDialog = true
+                        },
+                        modifier = Modifier.fillMaxWidth().height(44.dp),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Default.Edit, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.action_rename), fontWeight = FontWeight.SemiBold)
+                    }
+                    
+                    if (targetAcc.id != "default") {
+                        Button(
+                            onClick = {
+                                accountToDeleteConfirm = targetAcc
+                                accountOptionsModal = null
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer,
+                                contentColor = MaterialTheme.colorScheme.onErrorContainer
+                            ),
+                            modifier = Modifier.fillMaxWidth().height(44.dp),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(Icons.Default.Delete, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(stringResource(R.string.action_delete), fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { accountOptionsModal = null }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            }
+        )
+    }
+
+    if (accountToDeleteConfirm != null) {
+        val targetAcc = accountToDeleteConfirm!!
+        AlertDialog(
+            onDismissRequest = { accountToDeleteConfirm = null },
+            icon = { Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text(stringResource(R.string.main_delete_account_confirm_title, targetAcc.name)) },
+            text = { Text(stringResource(R.string.main_delete_account_confirm_text)) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        accountToDeleteConfirm = null
+                        accountMenuExpanded = false
+                        AccountManager.deleteAccount(context, targetAcc.id)
+                        activeAccount = AccountManager.getActiveAccount(context)
+                        accounts.value = AccountManager.getAccounts(context)
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) {
+                    Text(stringResource(R.string.action_delete))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { accountToDeleteConfirm = null }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            }
         )
     }
 
@@ -529,7 +755,12 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
     }
 
     if (accountMenuExpanded) {
-        ModalBottomSheet(onDismissRequest = { accountMenuExpanded = false }) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { accountMenuExpanded = false },
+            sheetState = sheetState
+        ) {
+            val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
             val activeAvatarFile = remember(activeAccount.id) { java.io.File(context.filesDir, "avatars/${activeAccount.id}.png") }
             val activeBitmap = remember(activeAvatarFile) {
                 if (activeAvatarFile.exists()) {
@@ -540,7 +771,10 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
             }
 
             Column(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(bottom = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 if (activeBitmap != null) {
@@ -588,150 +822,187 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
                     items(accounts.value.size) { i ->
                         val account = accounts.value[i]
                         val isActive = account.id == activeAccount.id
+                        val isEditing = editingAccountId == account.id
                         
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    accountMenuExpanded = false
-                                    if (account.id != activeAccount.id) {
-                                        if (ProxyState.isActualRunning()) showSwitchConfirmDialog = account
-                                        else { AccountManager.setActiveAccount(context, account.id); activeAccount = account }
-                                    }
-                                },
-                            shape = RoundedCornerShape(12.dp),
-                            color = if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
-                            border = if (isActive) androidx.compose.foundation.BorderStroke(
-                                1.5.dp,
-                                MaterialTheme.colorScheme.primary
-                            ) else null
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .combinedClickable(
+                                        onClick = {
+                                            if (editingAccountId != null) {
+                                                editingAccountId = null
+                                            } else {
+                                                accountMenuExpanded = false
+                                                if (account.id != activeAccount.id) {
+                                                    if (ProxyState.isActualRunning()) showSwitchConfirmDialog = account
+                                                    else { AccountManager.setActiveAccount(context, account.id); activeAccount = account }
+                                                }
+                                            }
+                                        },
+                                        onLongClick = {
+                                            haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                            editingAccountId = if (isEditing) null else account.id
+                                        }
+                                    ),
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
+                                border = if (isActive) androidx.compose.foundation.BorderStroke(
+                                    1.5.dp,
+                                    MaterialTheme.colorScheme.primary
+                                ) else null
                             ) {
-                                val avatarFile = remember(account.id) { java.io.File(context.filesDir, "avatars/${account.id}.png") }
-                                val bitmap = remember(avatarFile) {
-                                    if (avatarFile.exists()) {
-                                        try {
-                                            android.graphics.BitmapFactory.decodeFile(avatarFile.absolutePath)
-                                        } catch (e: Exception) { null }
-                                    } else null
-                                }
-
-                                if (bitmap != null) {
-                                    androidx.compose.foundation.Image(
-                                        bitmap = bitmap.asImageBitmap(),
-                                        contentDescription = null,
-                                        modifier = Modifier
-                                            .size(26.dp)
-                                            .clip(CircleShape),
-                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                                    )
-                                } else {
-                                    val nameLower = account.name.lowercase()
-                                    val (smartIcon, smartColor) = when {
-                                        nameLower.contains("github") -> Icons.Default.Hub to Color(0xFFFCC624)
-                                        nameLower.contains("headscale") -> Icons.Default.Cloud to Color(0xFF0078D4)
-                                        nameLower.contains("google") || nameLower.contains("gmail") -> Icons.Default.Email to Color(0xFFE91E63)
-                                        else -> Icons.Default.AccountCircle to (if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    val avatarFile = remember(account.id) { java.io.File(context.filesDir, "avatars/${account.id}.png") }
+                                    val bitmap = remember(avatarFile) {
+                                        if (avatarFile.exists()) {
+                                            try {
+                                                android.graphics.BitmapFactory.decodeFile(avatarFile.absolutePath)
+                                            } catch (e: Exception) { null }
+                                        } else null
                                     }
-                                    
-                                    Box(
-                                        modifier = Modifier
-                                            .size(26.dp)
-                                            .clip(CircleShape)
-                                            .background(smartColor.copy(alpha = 0.12f)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
+
+                                    if (bitmap != null) {
+                                        androidx.compose.foundation.Image(
+                                            bitmap = bitmap.asImageBitmap(),
+                                            contentDescription = null,
+                                            modifier = Modifier
+                                                .size(26.dp)
+                                                .clip(CircleShape),
+                                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                        )
+                                    } else {
+                                        val nameLower = account.name.lowercase()
+                                        val (smartIcon, smartColor) = when {
+                                            nameLower.contains("github") -> Icons.Default.Hub to Color(0xFFFCC624)
+                                            nameLower.contains("headscale") -> Icons.Default.Cloud to Color(0xFF0078D4)
+                                            nameLower.contains("google") || nameLower.contains("gmail") -> Icons.Default.Email to Color(0xFFE91E63)
+                                            else -> Icons.Default.AccountCircle to (if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                        
+                                        Box(
+                                            modifier = Modifier
+                                                .size(26.dp)
+                                                .clip(CircleShape)
+                                                .background(smartColor.copy(alpha = 0.12f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                smartIcon,
+                                                null,
+                                                tint = smartColor,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(
+                                        account.name,
+                                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (isActive) {
+                                        Spacer(Modifier.width(4.dp))
                                         Icon(
-                                            smartIcon,
+                                            Icons.Default.Check,
                                             null,
-                                            tint = smartColor,
-                                            modifier = Modifier.size(16.dp)
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
                                         )
                                     }
                                 }
-                                Spacer(Modifier.width(16.dp))
-                                Text(
-                                    account.name,
-                                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-                                    color = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                if (isActive) {
-                                    Icon(
-                                        Icons.Default.Check,
-                                        null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(20.dp)
-                                    )
+                            }
+
+                            AnimatedVisibility(
+                                visible = isEditing,
+                                enter = fadeIn() + expandHorizontally(),
+                                exit = fadeOut() + shrinkHorizontally()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(start = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    FilledTonalIconButton(
+                                        onClick = {
+                                            editingAccountId = null
+                                            accountToRename = account
+                                            showRenameAccountDialog = true
+                                        },
+                                        modifier = Modifier.size(40.dp),
+                                        shape = RoundedCornerShape(10.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Edit,
+                                            contentDescription = stringResource(R.string.action_rename),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+
+                                    if (account.id != "default") {
+                                        FilledTonalIconButton(
+                                            onClick = {
+                                                editingAccountId = null
+                                                accountToDeleteConfirm = account
+                                            },
+                                            modifier = Modifier.size(40.dp),
+                                            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                                containerColor = MaterialTheme.colorScheme.errorContainer,
+                                                contentColor = MaterialTheme.colorScheme.onErrorContainer
+                                            ),
+                                            shape = RoundedCornerShape(10.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Delete,
+                                                contentDescription = stringResource(R.string.action_delete),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(16.dp))
 
-                Row(
+                FilledTonalButton(
+                    onClick = {
+                        editingAccountId = null
+                        accountMenuExpanded = false
+                        showAddAccountDialog = true
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(horizontal = 16.dp)
+                        .height(48.dp),
+                    shape = RoundedCornerShape(12.dp)
                 ) {
-                    FilledTonalButton(
-                        onClick = { accountMenuExpanded = false; showAddAccountDialog = true },
-                        modifier = Modifier.weight(1f).height(44.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp)
-                    ) {
-                        Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(stringResource(R.string.action_add), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    }
-
-                    OutlinedButton(
-                        onClick = { accountMenuExpanded = false; showRenameAccountDialog = true },
-                        modifier = Modifier.weight(1f).height(44.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp)
-                    ) {
-                        Icon(Icons.Default.Edit, null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(stringResource(R.string.action_rename), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    }
-
-                    if (activeAccount.id != "default") {
-                        Button(
-                            onClick = {
-                                accountMenuExpanded = false
-                                AccountManager.deleteAccount(context, activeAccount.id)
-                                activeAccount = AccountManager.getActiveAccount(context)
-                                accounts.value = AccountManager.getAccounts(context)
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.errorContainer,
-                                contentColor = MaterialTheme.colorScheme.onErrorContainer
-                            ),
-                            modifier = Modifier.weight(1f).height(44.dp),
-                            shape = RoundedCornerShape(12.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp)
-                        ) {
-                            Icon(Icons.Default.Delete, null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.action_delete), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        }
-                    }
+                    Icon(Icons.Default.Add, null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        stringResource(R.string.action_add),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             }
         }
     }
 
-    Scaffold(
-        topBar = {
+        Scaffold(
+            topBar = {
             TopAppBar(
                 title = {
                     Column(modifier = Modifier.clickable { accountMenuExpanded = true }) {
@@ -881,14 +1152,14 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
             }
 
             StatusCard(
-                state = if (proxyState == "CONNECTION_ISSUE") "ACTIVE" else proxyState,
+                state = if (proxyState == "CONNECTION_ISSUE" || (proxyState == "LOGGED_OUT" && ProxyState.isActualRunning())) "ACTIVE" else proxyState,
                 isProcessing = isProcessing,
                 isTunEnabled = isTunEnabled,
                 isFullTunnel = isFullTunnel
             ) {
                 if (isProcessing) return@StatusCard
 
-                if (proxyState == "ACTIVE" || proxyState == "STARTING" || proxyState == "CONNECTION_ISSUE") {
+                if (proxyState == "ACTIVE" || proxyState == "STARTING" || proxyState == "CONNECTION_ISSUE" || proxyState == "LOGGED_OUT") {
                     isProcessing = true
                     val intent = Intent(context, TailscaledService::class.java).apply { action = "STOP_ACTION" }
                     context.startService(intent)
@@ -988,7 +1259,10 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
             try { appctr.Appctr.getCoreVersion() } catch (e: Exception) { "unknown" }
         }
         var latestVersion by remember { mutableStateOf<String?>(null) }
+        var downloadUrl by remember { mutableStateOf<String?>(null) }
         var isCheckingUpdate by remember { mutableStateOf(false) }
+        var isDownloading by remember { mutableStateOf(false) }
+        var downloadProgress by remember { mutableIntStateOf(0) }
 
         AlertDialog(
             onDismissRequest = { showAboutDialog = false },
@@ -1013,18 +1287,25 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
                     
                     if (latestVersion != null) {
                         val isNewer = isVersionNewer(versionName, latestVersion!!)
-                        if (isNewer) {
-                            Spacer(Modifier.height(8.dp))
-                            Surface(
-                                color = MaterialTheme.colorScheme.primaryContainer,
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.Download, null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(stringResource(R.string.main_new_version, latestVersion!!), color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold)
-                                }
+                        Spacer(Modifier.height(8.dp))
+                        Surface(
+                            color = if (isNewer) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    if (isNewer) Icons.Default.Download else Icons.Default.CheckCircle,
+                                    null,
+                                    tint = if (isNewer) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    if (isNewer) stringResource(R.string.main_new_version, latestVersion!!) else stringResource(R.string.main_update_up_to_date),
+                                    color = if (isNewer) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
                     }
@@ -1039,10 +1320,16 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
                     ) { Text(stringResource(R.string.main_dev_app)) }
                     
                     TextButton(
-                        onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Asutorufa/tailscale"))) },
+                        onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/bropines/tailsocks"))) },
                         modifier = Modifier.height(32.dp),
                         contentPadding = PaddingValues(0.dp)
                     ) { Text(stringResource(R.string.main_dev_patch)) }
+
+                    TextButton(
+                        onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Asutorufa/tailscale"))) },
+                        modifier = Modifier.height(32.dp),
+                        contentPadding = PaddingValues(0.dp)
+                    ) { Text(stringResource(R.string.main_dev_anet_patch)) }
 
                     TextButton(
                         onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/tailscale/tailscale"))) },
@@ -1051,39 +1338,169 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
                     ) { Text(stringResource(R.string.main_dev_core)) }
 
                     Spacer(Modifier.height(12.dp))
-                    Button(
-                        onClick = {
-                            isCheckingUpdate = true
-                            scope.launch(Dispatchers.IO) {
-                                try {
-                                    val connection = java.net.URL("https://api.github.com/repos/bropines/tailsocks/releases/latest").openConnection() as java.net.HttpURLConnection
-                                    connection.requestMethod = "GET"
-                                    connection.setRequestProperty("Accept", "application/vnd.github.v3+json")
-                                    if (connection.responseCode == 200) {
-                                        val response = connection.inputStream.bufferedReader().use { it.readText() }
-                                        val json = com.google.gson.Gson().fromJson(response, com.google.gson.JsonObject::class.java)
-                                        val tag = json.get("tag_name").asString
-                                        withContext(Dispatchers.Main) {
-                                            latestVersion = tag
-                                            isCheckingUpdate = false
+
+                    if (isDownloading) {
+                        Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                            LinearProgressIndicator(
+                                progress = { if (downloadProgress > 0) downloadProgress / 100f else 0f },
+                                modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                stringResource(R.string.main_update_downloading, downloadProgress),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    } else if (latestVersion != null && isVersionNewer(versionName, latestVersion!!)) {
+                        val destDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.cacheDir
+                        val cleanVer = latestVersion!!.removePrefix("v")
+                        val destFile = java.io.File(destDir, "tailsocks-update-$cleanVer.apk")
+
+                        var isApkCached by remember(destFile.absolutePath) {
+                            mutableStateOf(
+                                if (destFile.exists() && destFile.length() > 0) {
+                                    try {
+                                        val pInfo = context.packageManager.getPackageArchiveInfo(destFile.absolutePath, 0)
+                                        pInfo != null && pInfo.packageName == context.packageName
+                                    } catch (e: Exception) {
+                                        false
+                                    }
+                                } else false
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                if (isApkCached) {
+                                    Toast.makeText(context, context.getString(R.string.main_update_installing), Toast.LENGTH_SHORT).show()
+                                    launchApkInstaller(context, destFile)
+                                    return@Button
+                                }
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+                                    Toast.makeText(context, context.getString(R.string.main_update_grant_perm), Toast.LENGTH_LONG).show()
+                                    try {
+                                        context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
+                                    } catch (e: Exception) {
+                                        context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES))
+                                    }
+                                    return@Button
+                                }
+                                val targetUrl = downloadUrl ?: "https://github.com/bropines/tailsocks/releases/latest/download/app-release.apk"
+                                isDownloading = true
+                                downloadProgress = 0
+                                scope.launch(Dispatchers.IO) {
+                                    val tempFile = java.io.File(destDir, "tailsocks-update-$cleanVer.tmp")
+                                    try {
+                                        val url = java.net.URL(targetUrl)
+                                        val conn = url.openConnection() as java.net.HttpURLConnection
+                                        conn.instanceFollowRedirects = true
+                                        conn.connect()
+                                        val totalLength = conn.contentLength
+                                        
+                                        conn.inputStream.use { input ->
+                                            tempFile.outputStream().use { output ->
+                                                val buffer = ByteArray(8192)
+                                                var read: Int
+                                                var totalRead = 0L
+                                                while (input.read(buffer).also { read = it } != -1) {
+                                                    output.write(buffer, 0, read)
+                                                    totalRead += read
+                                                    if (totalLength > 0) {
+                                                        val pct = (totalRead * 100 / totalLength).toInt()
+                                                        withContext(Dispatchers.Main) { downloadProgress = pct }
+                                                    }
+                                                }
+                                            }
                                         }
-                                    } else { throw Exception("HTTP ${connection.responseCode}") }
-                                } catch (e: Exception) {
-                                    withContext(Dispatchers.Main) {
-                                        Toast.makeText(context, context.getString(R.string.main_check_failed_format, e.message), Toast.LENGTH_SHORT).show()
-                                        isCheckingUpdate = false
+
+                                        val pInfo = context.packageManager.getPackageArchiveInfo(tempFile.absolutePath, 0)
+                                        if (pInfo != null && pInfo.packageName == context.packageName) {
+                                            if (destFile.exists()) destFile.delete()
+                                            tempFile.renameTo(destFile)
+                                            withContext(Dispatchers.Main) {
+                                                isDownloading = false
+                                                isApkCached = true
+                                                Toast.makeText(context, context.getString(R.string.main_update_installing), Toast.LENGTH_SHORT).show()
+                                                launchApkInstaller(context, destFile)
+                                            }
+                                        } else {
+                                            if (tempFile.exists()) tempFile.delete()
+                                            withContext(Dispatchers.Main) {
+                                                isDownloading = false
+                                                Toast.makeText(context, context.getString(R.string.main_check_failed_format, "Corrupted APK downloaded"), Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        if (tempFile.exists()) tempFile.delete()
+                                        withContext(Dispatchers.Main) {
+                                            isDownloading = false
+                                            Toast.makeText(context, context.getString(R.string.main_check_failed_format, e.message), Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                 }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                        ) {
+                            Icon(if (isApkCached) Icons.Default.SystemUpdate else Icons.Default.Download, null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (isApkCached) stringResource(R.string.main_update_install_cached) else stringResource(R.string.main_update_download))
+                        }
+                    } else {
+                        Button(
+                            onClick = {
+                                isCheckingUpdate = true
+                                scope.launch(Dispatchers.IO) {
+                                    try {
+                                        val connection = java.net.URL("https://api.github.com/repos/bropines/tailsocks/releases/latest").openConnection() as java.net.HttpURLConnection
+                                        connection.requestMethod = "GET"
+                                        connection.setRequestProperty("Accept", "application/vnd.github.v3+json")
+                                        if (connection.responseCode == 200) {
+                                            val response = connection.inputStream.bufferedReader().use { it.readText() }
+                                            val json = com.google.gson.Gson().fromJson(response, com.google.gson.JsonObject::class.java)
+                                            val tag = json.get("tag_name").asString
+                                            var foundApkUrl: String? = null
+                                            var anyApkUrl: String? = null
+                                            val primaryAbi = if (Build.SUPPORTED_ABIS.isNotEmpty()) Build.SUPPORTED_ABIS[0] else ""
+                                            if (json.has("assets")) {
+                                                val assets = json.getAsJsonArray("assets")
+                                                for (asset in assets) {
+                                                    val obj = asset.asJsonObject
+                                                    val name = obj.get("name").asString.lowercase()
+                                                    val url = obj.get("browser_download_url").asString
+                                                    if (name.endsWith(".apk")) {
+                                                        if (anyApkUrl == null) anyApkUrl = url
+                                                        if (primaryAbi.isNotEmpty() && name.contains(primaryAbi.lowercase())) {
+                                                            foundApkUrl = url
+                                                            break
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            withContext(Dispatchers.Main) {
+                                                latestVersion = tag
+                                                downloadUrl = foundApkUrl ?: anyApkUrl
+                                                isCheckingUpdate = false
+                                            }
+                                        } else { throw Exception("HTTP ${connection.responseCode}") }
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            Toast.makeText(context, context.getString(R.string.main_check_failed_format, e.message), Toast.LENGTH_SHORT).show()
+                                            isCheckingUpdate = false
+                                        }
+                                    }
+                                }
+                            },
+                            enabled = !isCheckingUpdate,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                        ) {
+                            if (isCheckingUpdate) {
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onSecondary)
+                            } else {
+                                Text(stringResource(R.string.main_check_updates))
                             }
-                        },
-                        enabled = !isCheckingUpdate,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                    ) {
-                        if (isCheckingUpdate) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onSecondary)
-                        } else {
-                            Text(stringResource(R.string.main_check_updates))
                         }
                     }
                 } 
@@ -1091,10 +1508,10 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
             confirmButton = {
                 TextButton(onClick = {
                     val url = if (latestVersion != null) "https://github.com/bropines/tailsocks/releases/latest" 
-                             else "https://github.com/bropines/tailscaled-socks5-android"
+                             else "https://github.com/bropines/tailsocks"
                     context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                     showAboutDialog = false
-                }) { Text(if (latestVersion != null) stringResource(R.string.action_download) else stringResource(R.string.action_github)) }
+                }) { Text(stringResource(R.string.action_github)) }
             },
             dismissButton = { TextButton(onClick = { showAboutDialog = false }) { Text(stringResource(R.string.action_close)) } }
         )
@@ -1127,7 +1544,7 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
                         Text(stringResource(R.string.main_no_exit_nodes), color = MaterialTheme.colorScheme.outline)
                     }
                 } else {
-                    val currentExitNodeId = remember(showExitNodeSheet) { prefs.getString("exit_node_id", "") ?: "" }
+                    val currentExitNodeId = remember(showExitNodeSheet, activeAccount.id) { prefs.getString("exit_node_id", "") ?: "" }
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1215,7 +1632,7 @@ fun MainScreen(showAccountSwitcher: MutableState<Boolean>) {
                                 }
 
                                 items(exitNodes) { node ->
-                                    val isSelected = node.id == currentExitNodeId || node.getPrimaryIp() == exitNodeIp
+                                    val isSelected = if (exitNodeIp.isNotEmpty()) node.getPrimaryIp() == exitNodeIp else false
                                     val (osIcon, osColor) = getOsVisuals(node.os).let { (icon, color) ->
                                         if (icon == Icons.Default.Devices) Icons.Default.VpnKey to MaterialTheme.colorScheme.primary
                                         else icon to color

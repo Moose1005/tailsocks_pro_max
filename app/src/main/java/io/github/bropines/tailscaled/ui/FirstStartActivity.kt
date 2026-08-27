@@ -2,6 +2,9 @@ package io.github.bropines.tailscaled.ui
 
 import io.github.bropines.tailscaled.R
 import io.github.bropines.tailscaled.core.GlobalSettings
+import io.github.bropines.tailscaled.core.SlidingSegmentedChips
+import io.github.bropines.tailscaled.core.SegmentedChipItem
+import io.github.bropines.tailscaled.core.PredictiveBackContainer
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -26,6 +29,8 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -77,102 +82,118 @@ fun FirstStartScreen(onFinished: () -> Unit) {
     val activeAccount = remember { io.github.bropines.tailscaled.core.AccountManager.getActiveAccount(context) }
     val profilePrefs = remember(activeAccount) { context.getSharedPreferences("appctr_${activeAccount.id}", Context.MODE_PRIVATE) }
 
-    Scaffold(
-        bottomBar = {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 8.dp
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            bottomBar = {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 8.dp
                 ) {
-                    // Back Button
-                    if (pagerState.currentPage > 0) {
-                        TextButton(
-                            onClick = {
-                                scope.launch {
-                                    pagerState.animateScrollToPage(pagerState.currentPage - 1)
-                                }
-                            }
-                        ) {
-                            Text(stringResource(R.string.first_start_btn_back))
-                        }
-                    } else {
-                        Spacer(modifier = Modifier.width(80.dp))
-                    }
-
-                    // Indicators
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        repeat(6) { idx ->
-                            val isSelected = pagerState.currentPage == idx
-                            Box(
-                                modifier = Modifier
-                                    .size(if (isSelected) 10.dp else 8.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        if (isSelected) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
-                                    )
-                            )
+                        // Back Button
+                        if (pagerState.currentPage > 0) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(pagerState.currentPage - 1)
+                                    }
+                                }
+                            ) {
+                                Text(stringResource(R.string.first_start_btn_back))
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.width(80.dp))
+                        }
+
+                        // Indicators
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            repeat(6) { idx ->
+                                val isSelected = pagerState.currentPage == idx
+                                Box(
+                                    modifier = Modifier
+                                        .size(if (isSelected) 10.dp else 8.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            if (isSelected) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+                                        )
+                                )
+                            }
+                        }
+
+                        // Next / Finish Button
+                        if (pagerState.currentPage < 5) {
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(pagerState.currentPage + 1)
+                                    }
+                                },
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text(stringResource(R.string.first_start_btn_next))
+                            }
+                        } else {
+                            Button(
+                                onClick = onFinished,
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text(stringResource(R.string.first_start_btn_finish))
+                            }
                         }
                     }
-
-                    // Next / Finish Button
-                    if (pagerState.currentPage < 5) {
-                        Button(
-                            onClick = {
-                                scope.launch {
-                                    pagerState.animateScrollToPage(pagerState.currentPage + 1)
-                                }
-                            },
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text(stringResource(R.string.first_start_btn_next))
-                        }
-                    } else {
-                        Button(
-                            onClick = onFinished,
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text(stringResource(R.string.first_start_btn_finish))
-                        }
+                }
+            }
+        ) { paddingValues ->
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues),
+                userScrollEnabled = false
+            ) { page ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    when (page) {
+                        0 -> SlideWelcome()
+                        1 -> SlideHowItWorks()
+                        2 -> SlideControlPlane(profilePrefs)
+                        3 -> SlideBypassSetup()
+                        4 -> SlideLogin(profilePrefs)
+                        5 -> SlidePermissions()
                     }
                 }
             }
         }
-    ) { paddingValues ->
-        HorizontalPager(
-            state = pagerState,
+
+        IconButton(
+            onClick = onFinished,
             modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues),
-            userScrollEnabled = false
-        ) { page ->
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                when (page) {
-                    0 -> SlideWelcome()
-                    1 -> SlideHowItWorks()
-                    2 -> SlideControlPlane(profilePrefs)
-                    3 -> SlideBypassSetup()
-                    4 -> SlideLogin(profilePrefs)
-                    5 -> SlidePermissions()
-                }
-            }
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(12.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = stringResource(R.string.action_close),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -238,33 +259,30 @@ fun SlideWelcome() {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(12.dp))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                listOf(
-                    "sys" to stringResource(R.string.settings_lang_sys),
-                    "en" to stringResource(R.string.settings_lang_en),
-                    "ru" to stringResource(R.string.settings_lang_ru)
-                ).forEach { (id, label) ->
-                    val isSelected = currentLang == id
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = {
-                            currentLang = id
-                            GlobalSettings.setString(context, "app_locale", id)
-                            val localeList = if (id == "sys") {
-                                androidx.core.os.LocaleListCompat.getEmptyLocaleList()
-                            } else {
-                                androidx.core.os.LocaleListCompat.forLanguageTags(id)
-                            }
-                            androidx.appcompat.app.AppCompatDelegate.setApplicationLocales(localeList)
-                            (context as? android.app.Activity)?.recreate()
-                        },
-                        label = { Text(label) }
-                    )
-                }
-            }
+            val langList = listOf(
+                "sys" to stringResource(R.string.settings_lang_sys),
+                "en" to stringResource(R.string.settings_lang_en),
+                "ru" to stringResource(R.string.settings_lang_ru)
+            )
+            val selectedLangIdx = langList.indexOfFirst { it.first == currentLang }.coerceAtLeast(0)
+            SlidingSegmentedChips(
+                options = langList.map { it.second },
+                selectedIndex = selectedLangIdx,
+                onOptionSelected = { idx ->
+                    val id = langList[idx].first
+                    currentLang = id
+                    GlobalSettings.setString(context, "app_locale", id)
+                    val localeList = if (id == "sys") {
+                        androidx.core.os.LocaleListCompat.getEmptyLocaleList()
+                    } else {
+                        androidx.core.os.LocaleListCompat.forLanguageTags(id)
+                    }
+                    androidx.appcompat.app.AppCompatDelegate.setApplicationLocales(localeList)
+                    (context as? android.app.Activity)?.recreate()
+                },
+                modifier = Modifier.fillMaxWidth(),
+                height = 38.dp
+            )
         }
     }
 }
@@ -273,6 +291,38 @@ fun SlideWelcome() {
 fun SlideHowItWorks() {
     val context = LocalContext.current
     var isTunMode by remember { mutableStateOf(GlobalSettings.isTunModeEnabled(context)) }
+    var isRootMode by remember { mutableStateOf(GlobalSettings.isRootModeEnabled(context)) }
+    var showRootWarningDialog by remember { mutableStateOf(false) }
+
+    if (showRootWarningDialog) {
+        AlertDialog(
+            onDismissRequest = { showRootWarningDialog = false },
+            title = { Text(stringResource(R.string.settings_root_warning_dialog_title)) },
+            text = { Text(stringResource(R.string.settings_root_warning_dialog_body)) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showRootWarningDialog = false
+                        if (io.github.bropines.tailscaled.core.RootUtils.isRootAvailable()) {
+                            isRootMode = true
+                            GlobalSettings.setRootModeEnabled(context, true)
+                            Toast.makeText(context, "Root Mode enabled", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Root access (su) not granted or unavailable", Toast.LENGTH_LONG).show()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text(stringResource(R.string.settings_root_warning_dialog_confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRootWarningDialog = false }) {
+                    Text(stringResource(R.string.settings_root_warning_dialog_cancel))
+                }
+            }
+        )
+    }
 
     SlideContainer(
         icon = Icons.Default.Language,
@@ -283,49 +333,84 @@ fun SlideHowItWorks() {
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(
+            SlidingSegmentedChips(
+                options = listOf("Proxy Mode", "VPN (TUN) Mode"),
+                selectedIndex = if (isTunMode) 1 else 0,
+                onOptionSelected = { idx ->
+                    if (!isRootMode) {
+                        isTunMode = (idx == 1)
+                        GlobalSettings.setTunModeEnabled(context, isTunMode)
+                    }
+                },
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                FilterChip(
-                    selected = !isTunMode,
-                    onClick = {
-                        isTunMode = false
-                        GlobalSettings.setTunModeEnabled(context, false)
-                    },
-                    label = { Text("Proxy Mode") },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = isTunMode,
-                    onClick = {
-                        isTunMode = true
-                        GlobalSettings.setTunModeEnabled(context, true)
-                    },
-                    label = { Text("VPN (TUN) Mode") },
-                    modifier = Modifier.weight(1f)
-                )
-            }
+                height = 38.dp
+            )
 
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (isRootMode) 0.2f else 0.4f)
                 ),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = if (!isTunMode) stringResource(R.string.first_start_mode_proxy_title) else stringResource(R.string.first_start_mode_vpn_title),
+                        text = if (isRootMode) {
+                            "Root Mode active"
+                        } else if (!isTunMode) {
+                            stringResource(R.string.first_start_mode_proxy_title)
+                        } else {
+                            stringResource(R.string.first_start_mode_vpn_title)
+                        },
                         fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.bodyMedium
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (isRootMode) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = if (!isTunMode) stringResource(R.string.first_start_mode_proxy_desc) else stringResource(R.string.first_start_mode_vpn_desc),
+                        text = if (isRootMode) {
+                            "Proxy and TUN modes are inactive because TailSocks operates natively as a system daemon in Root mode."
+                        } else if (!isTunMode) {
+                            stringResource(R.string.first_start_mode_proxy_desc)
+                        } else {
+                            stringResource(R.string.first_start_mode_vpn_desc)
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                    )
+                }
+            }
+
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(Icons.Default.Security, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error)
+                            Text(stringResource(R.string.settings_root_sect_title), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(stringResource(R.string.settings_root_enable_desc), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(
+                        checked = isRootMode,
+                        onCheckedChange = { checked ->
+                            if (checked) {
+                                showRootWarningDialog = true
+                            } else {
+                                isRootMode = false
+                                GlobalSettings.setRootModeEnabled(context, false)
+                            }
+                        }
                     )
                 }
             }
@@ -570,11 +655,43 @@ fun SlideBypassSetup() {
                             )
                             OutlinedTextField(
                                 value = proxyPort,
-                                onValueChange = {
-                                    proxyPort = it
-                                    GlobalSettings.setCPField(context, "port", it)
+                                onValueChange = { newValue ->
+                                    val digits = newValue.filter { it.isDigit() }
+                                    if (digits.length <= 5) {
+                                        val num = digits.toIntOrNull()
+                                        if (num == null || num <= 65535) {
+                                            proxyPort = digits
+                                            GlobalSettings.setCPField(context, "port", digits)
+                                        }
+                                    }
                                 },
                                 label = { Text(stringResource(R.string.first_start_proxy_port_label)) },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                            )
+                        }
+
+                        Spacer(Modifier.height(4.dp))
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = proxyUser,
+                                onValueChange = {
+                                    proxyUser = it
+                                    GlobalSettings.setCPField(context, "user", it)
+                                },
+                                label = { Text(stringResource(R.string.settings_socks5_username_title)) },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                value = proxyPass,
+                                onValueChange = {
+                                    proxyPass = it
+                                    GlobalSettings.setCPField(context, "pass", it)
+                                },
+                                label = { Text(stringResource(R.string.settings_socks5_password_title)) },
                                 modifier = Modifier.weight(1f),
                                 singleLine = true
                             )
@@ -746,7 +863,7 @@ fun SlidePermissions() {
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = "Разрешить Уведомления",
+                            text = stringResource(R.string.onboarding_perm_notif_title),
                             fontWeight = FontWeight.Bold,
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.weight(1f)
@@ -757,7 +874,7 @@ fun SlidePermissions() {
                             },
                             shape = RoundedCornerShape(8.dp)
                         ) {
-                            Text("Выдать")
+                            Text(stringResource(R.string.onboarding_perm_grant))
                         }
                     }
                 }
@@ -780,12 +897,12 @@ fun SlidePermissions() {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Игнорировать батарею",
+                                text = stringResource(R.string.onboarding_perm_battery_title),
                                 fontWeight = FontWeight.Bold,
                                 style = MaterialTheme.typography.bodyMedium
                             )
                             Text(
-                                text = "Предотвращает закрытие службы в фоне",
+                                text = stringResource(R.string.onboarding_perm_battery_desc),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline
                             )
@@ -795,14 +912,14 @@ fun SlidePermissions() {
                                 try {
                                     val intent = Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
                                     context.startActivity(intent)
-                                    Toast.makeText(context, "Найдите TailSocks и отключите оптимизацию", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(context, context.getString(R.string.onboarding_perm_battery_toast), Toast.LENGTH_LONG).show()
                                 } catch (e: Exception) {
-                                    Toast.makeText(context, "Не удалось открыть настройки", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, context.getString(R.string.onboarding_perm_battery_error), Toast.LENGTH_SHORT).show()
                                 }
                             },
                             shape = RoundedCornerShape(8.dp)
                         ) {
-                            Text("Настроить")
+                            Text(stringResource(R.string.onboarding_perm_battery_configure))
                         }
                     }
                 }

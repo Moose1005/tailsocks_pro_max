@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -87,26 +88,75 @@ func Login(authKey string) string {
 	}
 	slog.Info("LocalAPI: [POST] /localapi/v0/start", "has_key", authKey != "")
 
-	// ipn.Options structure
+	stateMu.Lock()
+	opt := lastOptions
+	stateMu.Unlock()
+
 	opts := map[string]interface{}{
 		"AuthKey": authKey,
 	}
+
+	if opt != nil && opt.LoginServer != "" {
+		opts["UpdatePrefs"] = map[string]interface{}{
+			"ControlURL":  opt.LoginServer,
+			"WantRunning": true,
+		}
+	} else {
+		opts["UpdatePrefs"] = map[string]interface{}{
+			"WantRunning": true,
+		}
+	}
+
 	data, _ := json.Marshal(opts)
 
 	_, err := doLocalRequest("POST", "/localapi/v0/start", strings.NewReader(string(data)))
 	if err != nil {
 		return "Error: " + err.Error()
 	}
+
+	if authKey == "" {
+		slog.Info("LocalAPI: triggering /localapi/v0/login-interactive")
+		time.Sleep(300 * time.Millisecond)
+		_, err := doLocalRequest("POST", "/localapi/v0/login-interactive", nil)
+		if err != nil {
+			return "Error: " + err.Error()
+		}
+
+		for i := 0; i < 15; i++ {
+			time.Sleep(300 * time.Millisecond)
+			sData, err := doLocalRequest("GET", "/localapi/v0/status", nil)
+			if err == nil {
+				var st struct {
+					AuthURL string `json:"AuthURL"`
+				}
+				if json.Unmarshal(sData, &st) == nil && st.AuthURL != "" {
+					slog.Info("LocalAPI: AuthURL ready", "url", st.AuthURL)
+					break
+				}
+			}
+			if i == 5 {
+				slog.Info("LocalAPI: re-triggering login-interactive")
+				_, _ = doLocalRequest("POST", "/localapi/v0/login-interactive", nil)
+			}
+		}
+	}
 	return "OK"
 }
 
 // Logout signs out via LocalAPI /logout.
 func Logout() string {
-	if !IsRunning() {
-		return "Error: " + errNotRunning.Error()
+	err := LogoutDaemon()
+
+	stateMu.Lock()
+	pc := PC
+	stateMu.Unlock()
+
+	if pc.State() != "" {
+		slog.Info("Wiping state directory after logout", "dir", pc.State())
+		_ = os.Remove(pc.State() + "/tailscaled.state")
+		_ = os.RemoveAll(pc.State() + "/profiles")
 	}
-	slog.Info("LocalAPI: [POST] /localapi/v0/logout")
-	_, err := doLocalRequest("POST", "/localapi/v0/logout", nil)
+
 	if err != nil {
 		return "Error: " + err.Error()
 	}
@@ -115,22 +165,22 @@ func Logout() string {
 
 // SetPrefs updates preferences via LocalAPI PATCH (EditPrefs).
 func SetPrefs(prefsJson string) string {
-	if !IsRunning() {
-		return "Error: " + errNotRunning.Error()
-	}
-	slog.Info("LocalAPI: [PATCH] /localapi/v0/prefs", "payload", prefsJson)
-	_, err := doLocalRequest("PATCH", "/localapi/v0/prefs", strings.NewReader(prefsJson))
-	if err != nil {
+	if err := PatchPrefsJSON(prefsJson); err != nil {
 		return "Error: " + err.Error()
 	}
 	return "OK"
 }
 
-// GetLoginURL returns the authentication URL from the daemon status.
+// GetLoginURL returns the authentication URL from IPN bus snapshot or daemon status.
 func GetLoginURL() string {
 	if !IsRunning() {
 		return ""
 	}
+	bs := GetBusState()
+	if bs.AuthURL != "" {
+		return bs.AuthURL
+	}
+
 	data, err := doLocalRequest("GET", "/localapi/v0/status", nil)
 	if err != nil {
 		return ""
@@ -143,10 +193,13 @@ func GetLoginURL() string {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return ""
 	}
+	if s.AuthURL != "" {
+		busStateMu.Lock()
+		busState.AuthURL = s.AuthURL
+		busStateMu.Unlock()
+	}
 	return s.AuthURL
 }
-
-
 
 // GetServeConfig returns the current Serve/Funnel configuration.
 func GetServeConfig() string {
@@ -249,7 +302,7 @@ func SetServeConfig(configJson string) string {
 	if etag != "" {
 		resetReq.Header.Set("If-Match", etag)
 	}
-	
+
 	resetResp, err := client.Do(resetReq)
 	var nextEtag = etag
 	if err == nil {
@@ -268,7 +321,7 @@ func SetServeConfig(configJson string) string {
 	// If the config is literally "{}", we might want to stop here to ensure everything is purged.
 	if string(cleanJson) == "{}" {
 		slog.Info("LocalAPI: Full purge requested, stopping after reset")
-		// Force one more attempt if reset didn't seem to return OK? 
+		// Force one more attempt if reset didn't seem to return OK?
 		// Actually, we'll trust Step 2 for now, but let's ensure nextEtag is updated.
 		return "OK"
 	}
@@ -282,7 +335,7 @@ func SetServeConfig(configJson string) string {
 
 	// STEP 3: Apply the new config.
 	slog.Info("LocalAPI: ServeConfig [Step 2/2] Applying new config", "if_match", nextEtag, "payload", string(cleanJson))
-	
+
 	applyReq, _ := http.NewRequest("POST", "http://local-tailscaled.sock/localapi/v0/serve-config", strings.NewReader(string(cleanJson)))
 	if nextEtag != "" {
 		applyReq.Header.Set("If-Match", nextEtag)

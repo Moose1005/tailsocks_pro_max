@@ -2,13 +2,18 @@ package appctr
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
+
 // cmd and stateMu are declared in appctr.go; do not redeclare here.
 
 func tailscaledCmd(p pathControl, dnsFallbacks string, socksAddr, httpAddr, socksUser, socksPass, taildropDir, controlProxy string) error {
@@ -42,6 +47,8 @@ func tailscaledCmd(p pathControl, dnsFallbacks string, socksAddr, httpAddr, sock
 	)
 	if dnsFallbacks != "" {
 		c.Env = append(c.Env, "TS_DNS_FALLBACK="+dnsFallbacks)
+	} else {
+		c.Env = append(c.Env, "TS_DNS_FALLBACK=1.1.1.1,8.8.8.8")
 	}
 
 	// Proxy configuration (Outbound)
@@ -49,13 +56,17 @@ func tailscaledCmd(p pathControl, dnsFallbacks string, socksAddr, httpAddr, sock
 	c.Env = append(c.Env, "TS_SOCKS5_SERVER=")
 
 	if controlProxy != "" {
+		if staticOverride := resolveProxyHostStatic(controlProxy); staticOverride != "" {
+			c.Env = append(c.Env, "TS_STATIC_HOSTS="+staticOverride)
+			slog.Info("Proxy: Set static DNS override for proxy host", "override", staticOverride)
+		}
 		if strings.HasPrefix(controlProxy, "socks5://") {
 			// For SOCKS5: use ALL_PROXY only. Do NOT add HTTP_PROXY or HTTPS_PROXY.
 			c.Env = append(c.Env, "ALL_PROXY="+controlProxy)
 			slog.Info("Proxy: Using SOCKS5 via ALL_PROXY", "url", controlProxy)
 		} else {
 			// For HTTP(S) proxy use the standard environment variables.
-			c.Env = append(c.Env, 
+			c.Env = append(c.Env,
 				"HTTP_PROXY="+controlProxy,
 				"HTTPS_PROXY="+controlProxy,
 			)
@@ -105,4 +116,42 @@ func tailscaledCmd(p pathControl, dnsFallbacks string, socksAddr, httpAddr, sock
 	}()
 
 	return c.Wait()
+}
+
+func resolveProxyHostStatic(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "" || net.ParseIP(host) != nil {
+		return ""
+	}
+
+	// 1. Try standard Go resolver
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err == nil && len(addrs) > 0 {
+		return host + "=" + addrs[0]
+	}
+
+	// 2. Direct DNS query fallback via 1.1.1.1:53 UDP
+	r := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 2 * time.Second}
+			return d.DialContext(ctx, "udp", "1.1.1.1:53")
+		},
+	}
+	addrs, err = r.LookupHost(ctx, host)
+	if err == nil && len(addrs) > 0 {
+		return host + "=" + addrs[0]
+	}
+
+	return ""
 }

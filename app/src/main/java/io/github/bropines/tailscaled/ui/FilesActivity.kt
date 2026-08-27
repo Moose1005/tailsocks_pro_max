@@ -25,15 +25,18 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import appctr.Appctr
 import io.github.bropines.tailscaled.ui.theme.TailSocksTheme
@@ -44,9 +47,22 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import androidx.activity.compose.PredictiveBackHandler
+import kotlinx.coroutines.CancellationException
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.tween
 
 class FilesActivity : ComponentActivity() {
     override fun attachBaseContext(newBase: Context) {
@@ -64,7 +80,9 @@ class FilesActivity : ComponentActivity() {
 fun FilesScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val pagerState = rememberPagerState(pageCount = { 3 })
+    val mainPagerState = rememberPagerState(pageCount = { 2 })
+    val taildropPagerState = rememberPagerState(pageCount = { 3 })
+
     val activeAccount = remember { AccountManager.getActiveAccount(context) }
     val taildropDir = remember(activeAccount.id) { File(context.filesDir, "states/${activeAccount.id}/taildrop").apply { if (!exists()) mkdirs() } }
 
@@ -148,7 +166,7 @@ fun FilesScreen(onBack: () -> Unit) {
     }
 
     LaunchedEffect(activeAccount.id) { refreshData() }
-    LaunchedEffect(pagerState.currentPage) { refreshData() }
+    LaunchedEffect(taildropPagerState.currentPage, mainPagerState.currentPage) { refreshData() }
 
     fun handleSaveRequest(file: TaildropFile) {
         val rootUri = GlobalSettings.getTaildropRootUri(context)
@@ -168,83 +186,121 @@ fun FilesScreen(onBack: () -> Unit) {
         } else { fileToSaveManual = file; saveLauncher.launch(file.Name) }
     }
 
-    Scaffold(
-        topBar = {
-            Column {
-                TopAppBar(title = { Column { Text(stringResource(R.string.files_hub_title)); Text(activeAccount.name, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) } },
-                    navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back)) } },
-                    actions = {
-                        IconButton(onClick = {
-                            context.startActivity(Intent(context, TaildriveActivity::class.java))
-                        }) { Icon(Icons.Default.Storage, stringResource(R.string.files_cd_taildrive)) }
-                        IconButton(onClick = { 
-                            refreshData();
-                        }) { Icon(Icons.Default.Refresh, stringResource(R.string.action_refresh)) }
-                    })
-                val fileTabs = listOf(
-                    stringResource(R.string.files_tab_inbox),
-                    stringResource(R.string.files_tab_devices),
-                    stringResource(R.string.files_tab_history)
-                )
-                val listState = rememberLazyListState()
-                LaunchedEffect(pagerState.currentPage) {
-                    listState.animateScrollToItem(pagerState.currentPage)
-                }
-                LazyRow(
-                    state = listState,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    items(fileTabs.size) { index ->
-                        FilterChip(
-                            selected = pagerState.currentPage == index,
-                            onClick = {
-                                scope.launch {
-                                    pagerState.animateScrollToPage(index)
-                                }
+    PredictiveBackContainer(
+        onBack = onBack,
+        targetTitle = stringResource(R.string.predictive_back_target_dashboard),
+        targetIcon = Icons.Default.Home
+    ) {
+        Scaffold(
+            topBar = {
+                Column {
+                    TopAppBar(
+                        title = {
+                            Column {
+                                Text("TailFiles Hub")
+                                Text(activeAccount.name, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                            }
+                        },
+                        navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back)) } },
+                        actions = {
+                            IconButton(onClick = { refreshData() }) { Icon(Icons.Default.Refresh, stringResource(R.string.action_refresh)) }
+                        }
+                    )
+
+                    // Continuous Drag-Bound Sliding Pill Selector (TailDrive vs TailDrop)
+                    val pagePosition = (mainPagerState.currentPage + mainPagerState.currentPageOffsetFraction).coerceIn(0f, 1f)
+
+                    SlidingSegmentedChips(
+                        items = listOf(
+                            SegmentedChipItem("TailDrive", Icons.Default.Storage),
+                            SegmentedChipItem("TailDrop", Icons.AutoMirrored.Filled.Send)
+                        ),
+                        selectedIndex = mainPagerState.currentPage,
+                        onOptionSelected = { index ->
+                            scope.launch { mainPagerState.animateScrollToPage(index) }
+                        },
+                        positionOffset = pagePosition,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 6.dp),
+                        height = 44.dp
+                    )
+
+                    // Sub-tabs: Smooth drag-bound sliding pill for TailDrop sub-pages
+                    AnimatedVisibility(
+                        visible = mainPagerState.currentPage == 1,
+                        enter = fadeIn(animationSpec = tween(250)) + expandVertically(animationSpec = tween(250)),
+                        exit = fadeOut(animationSpec = tween(200)) + shrinkVertically(animationSpec = tween(200))
+                    ) {
+                        val fileTabs = listOf(
+                            stringResource(R.string.files_tab_inbox),
+                            stringResource(R.string.files_tab_devices),
+                            stringResource(R.string.files_tab_history)
+                        )
+                        val dropSubOffset = (taildropPagerState.currentPage + taildropPagerState.currentPageOffsetFraction).coerceIn(0f, 2f)
+
+                        SlidingSegmentedChips(
+                            options = fileTabs,
+                            selectedIndex = taildropPagerState.currentPage,
+                            onOptionSelected = { index ->
+                                scope.launch { taildropPagerState.animateScrollToPage(index) }
                             },
-                            label = { Text(fileTabs[index]) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
+                            positionOffset = dropSubOffset,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 24.dp, vertical = 4.dp),
+                            height = 36.dp
                         )
                     }
                 }
+            },
+            floatingActionButton = { 
+                AnimatedVisibility(
+                    visible = mainPagerState.currentPage == 1,
+                    enter = fadeIn(animationSpec = tween(200)),
+                    exit = fadeOut(animationSpec = tween(150))
+                ) {
+                    FloatingActionButton(onClick = { filePickerLauncher.launch("*/*") }) {
+                        Icon(Icons.Default.FileUpload, stringResource(R.string.action_send))
+                    } 
+                }
             }
-        },
-        floatingActionButton = { FloatingActionButton(onClick = { filePickerLauncher.launch("*/*") }) { Icon(Icons.Default.FileUpload, stringResource(R.string.action_send)) } }
-    ) { padding ->
+        ) { padding ->
         PullToRefreshBox(
             isRefreshing = isLoading,
             onRefresh = { refreshData() },
             modifier = Modifier.padding(padding).fillMaxSize()
         ) {
-            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
-                when (page) {
-                    0 -> if (files.isEmpty() && !isLoading) EmptyState(Icons.Default.Inbox, stringResource(R.string.files_empty_inbox)) 
-                        else LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(files) { f -> FileCard(f, { openTaildropFile(context, f) }, { handleSaveRequest(f) }, { 
-                                val deleted = Appctr.deleteTaildropFileFromAPI(f.Name)
-                                if (deleted) refreshData() 
-                            }) }
+            HorizontalPager(state = mainPagerState, modifier = Modifier.fillMaxSize()) { mainPage ->
+                if (mainPage == 0) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        TaildriveTabContent()
+                    }
+                } else {
+                    HorizontalPager(state = taildropPagerState, modifier = Modifier.fillMaxSize()) { page ->
+                        when (page) {
+                            0 -> if (files.isEmpty() && !isLoading) EmptyState(Icons.Default.Inbox, stringResource(R.string.files_empty_inbox)) 
+                                else LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    items(files) { f -> FileCard(f, { openTaildropFile(context, f) }, { handleSaveRequest(f) }, { 
+                                        val deleted = Appctr.deleteTaildropFileFromAPI(f.Name)
+                                        if (deleted) refreshData() 
+                                    }) }
+                                }
+                            1 -> if (peers.isEmpty() && selfPeer == null && !isLoading) EmptyState(Icons.Default.Devices, stringResource(R.string.files_empty_devices)) 
+                                else LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+                                    if (selfPeer != null) {
+                                        item { PeerItem(selfPeer!!, true) {} }
+                                    }
+                                    items(peers) { p -> 
+                                        PeerItem(p, false) { Toast.makeText(context, context.getString(R.string.files_use_fab_to_send), Toast.LENGTH_SHORT).show() }
+                                    }
+                                }
+                            2 -> if (sentFiles.isEmpty() && !isLoading) EmptyState(Icons.Default.History, stringResource(R.string.files_empty_history)) 
+                                else LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    items(sentFiles) { e -> SentFileCard(e) }
+                                }
                         }
-                    1 -> if (peers.isEmpty() && selfPeer == null && !isLoading) EmptyState(Icons.Default.Devices, stringResource(R.string.files_empty_devices)) 
-                        else LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
-                            if (selfPeer != null) {
-                                item { PeerItem(selfPeer!!, true) {} }
-                            }
-                            items(peers) { p -> 
-                                PeerItem(p, false) { Toast.makeText(context, context.getString(R.string.files_use_fab_to_send), Toast.LENGTH_SHORT).show() }
-                            }
-                        }
-                    2 -> if (sentFiles.isEmpty() && !isLoading) EmptyState(Icons.Default.History, stringResource(R.string.files_empty_history)) 
-                        else LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(sentFiles) { e -> SentFileCard(e) }
-                        }
+                    }
                 }
             }
             if (isSavingFile) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -285,6 +341,7 @@ fun FilesScreen(onBack: () -> Unit) {
             }
         }
     }
+}
 }
 
 private suspend fun saveFileToUri(context: Context, file: TaildropFile, destUri: Uri) {

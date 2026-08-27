@@ -19,6 +19,7 @@
         android:protectionLevel="signature" />
     <uses-permission android:name="pan.alexander.tordnscrypt.BRIDGE_PERMISSION" />
     
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />
@@ -30,6 +31,8 @@
         android:roundIcon="@mipmap/ic_launcher_round" 
         android:theme="@style/Theme.Tailscaled" 
         android:usesCleartextTraffic="true"
+        android:enableOnBackInvokedCallback="true"
+        android:hasFragileUserData="true"
         tools:targetApi="34">
 
         <activity android:name=".ui.MainActivity" android:exported="true" android:launchMode="singleTask">
@@ -108,7 +111,7 @@
             android:label="@string/title_activity_tun_excluded_apps"
             android:exported="false" />
 
-        <service android:name=".core.ProxyTileService" android:exported="true" android:label="TailSocks" android:icon="@drawable/ic_launcher_foreground" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+        <service android:name=".core.ProxyTileService" android:exported="true" android:label="TailSocks" android:icon="@drawable/ic_qs_tile" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
@@ -119,6 +122,31 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Tasker & Automation Integration Receiver -->
+        <receiver android:name=".core.TaskerReceiver" android:enabled="true" android:exported="true">
+            <intent-filter>
+                <action android:name="io.github.bropines.tailscaled.action.CONNECT" />
+                <action android:name="io.github.bropines.tailscaled.action.DISCONNECT" />
+                <action android:name="io.github.bropines.tailscaled.action.TOGGLE" />
+                <action android:name="io.github.bropines.tailscaled.action.RESTART" />
+                <action android:name="io.github.bropines.tailscaled.action.GET_STATUS" />
+                <action android:name="io.github.bropines.tailscaled.action.SET_EXIT_NODE" />
+                <action android:name="io.github.bropines.tailscaled.action.SWITCH_ACCOUNT" />
+                <action android:name="io.github.bropines.tailscaled.action.SET_BYEDPI" />
+                <action android:name="io.github.bropines.tailscaled.action.SET_TUN" />
+                <action android:name="io.github.bropines.tailscaled.START" />
+                <action android:name="io.github.bropines.tailscaled.STOP" />
+                <action android:name="io.github.bropines.tailscaled.TOGGLE" />
+                <action android:name="io.github.bropines.tailscaled.RESTART" />
+                <action android:name="io.github.bropines.tailscaled.GET_STATUS" />
+                <action android:name="io.github.bropines.tailscaled.SET_EXIT_NODE" />
+                <action android:name="io.github.bropines.tailscaled.SWITCH_ACCOUNT" />
+                <action android:name="io.github.bropines.tailscaled.SET_BYEDPI" />
+                <action android:name="io.github.bropines.tailscaled.SET_TUN" />
             </intent-filter>
         </receiver>
 
@@ -139,6 +167,11 @@
         <receiver android:name=".ui.ServiceToggleWidgetReceiver" android:exported="false" android:label="TailSocks Switcher">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="io.github.bropines.tailscaled.STATUS_CHANGED" />
+                <action android:name="io.github.bropines.tailscaled.STATUS" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.USER_PRESENT" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
@@ -149,39 +182,25 @@
         <receiver android:name=".ui.ExitNodeToggleWidgetReceiver" android:exported="false" android:label="TailSocks Exit Node">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="io.github.bropines.tailscaled.STATUS_CHANGED" />
+                <action android:name="io.github.bropines.tailscaled.STATUS" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.USER_PRESENT" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/widget_info_exit_node" />
         </receiver>
-
-        <!-- Stats Dashboard Widget -->
-        <receiver android:name=".ui.StatsWidgetReceiver" android:exported="false" android:label="TailSocks Dashboard">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data
-                android:name="android.appwidget.provider"
-                android:resource="@xml/widget_info_stats" />
-        </receiver>
-
-        <!-- Serve Config Status Widget -->
-        <receiver android:name=".ui.ServeWidgetReceiver" android:exported="false" android:label="TailSocks Serve">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data
-                android:name="android.appwidget.provider"
-                android:resource="@xml/widget_info_serve" />
-        </receiver>
         <!-- AppLocalesMetadataHolderService for backward-compatible app-specific language settings -->
+        <!-- Jetpack AppFunctions Service (Gemini On-Device AI Integration) -->
         <service
-            android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
-            android:enabled="false"
-            android:exported="false">
-            <meta-data
-                android:name="autoStoreLocales"
-                android:value="true" />
+            android:name=".appfunctions.TailSocksAppFunctionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_APP_FUNCTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.app.appfunctions.AppFunctionService" />
+            </intent-filter>
         </service>
     </application>
 </manifest>

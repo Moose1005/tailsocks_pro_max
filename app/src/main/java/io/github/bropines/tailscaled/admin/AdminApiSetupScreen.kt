@@ -199,22 +199,21 @@ fun AdminApiSetupScreen(
                 }
             }
 
-            // Auth Type TabRow
-            TabRow(
-                selectedTabIndex = if (authType == "TOKEN") 0 else 1,
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
-            ) {
-                Tab(
-                    selected = authType == "TOKEN",
-                    onClick = { authType = "TOKEN" },
-                    text = { Text(stringResource(R.string.admin_setup_tab_token), fontSize = 13.sp) }
-                )
-                Tab(
-                    selected = authType == "OAUTH",
-                    onClick = { authType = "OAUTH" },
-                    text = { Text(stringResource(R.string.admin_setup_tab_oauth), fontSize = 13.sp) }
-                )
-            }
+            // Auth Type SlidingSegmentedChips
+            val authTypes = listOf(
+                stringResource(R.string.admin_setup_tab_token),
+                stringResource(R.string.admin_setup_tab_oauth)
+            )
+            val selectedAuthIdx = if (authType == "TOKEN") 0 else 1
+            SlidingSegmentedChips(
+                options = authTypes,
+                selectedIndex = selectedAuthIdx,
+                onOptionSelected = { idx ->
+                    authType = if (idx == 0) "TOKEN" else "OAUTH"
+                },
+                modifier = Modifier.fillMaxWidth(),
+                height = 38.dp
+            )
 
             if (authType == "TOKEN") {
                 OutlinedTextField(
@@ -278,6 +277,7 @@ fun AdminApiSetupScreen(
                         Text(stringResource(R.string.admin_proxy_mode_label), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             val proxyOptions = listOf(
+                                "CONTROL_PLANE" to stringResource(R.string.admin_proxy_control_plane),
                                 "DIRECT" to stringResource(R.string.admin_proxy_direct),
                                 "LOCAL_SOCKS5" to stringResource(R.string.admin_proxy_local_socks5),
                                 "CUSTOM_SOCKS5" to stringResource(R.string.admin_proxy_custom_socks5)
@@ -293,7 +293,14 @@ fun AdminApiSetupScreen(
                             }
                         }
 
-                        if (proxyMode == "CUSTOM_SOCKS5") {
+                        if (proxyMode == "CONTROL_PLANE") {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                stringResource(R.string.admin_proxy_control_plane_desc),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else if (proxyMode == "CUSTOM_SOCKS5") {
                             Spacer(Modifier.height(8.dp))
                             OutlinedTextField(
                                 value = proxyHost,
@@ -305,16 +312,24 @@ fun AdminApiSetupScreen(
                                 shape = RoundedCornerShape(8.dp)
                             )
                             Spacer(Modifier.height(8.dp))
-                            OutlinedTextField(
-                                value = proxyPort,
-                                onValueChange = { proxyPort = it },
-                                label = { Text(stringResource(R.string.admin_proxy_socks5_port)) },
-                                placeholder = { Text(stringResource(R.string.admin_proxy_socks5_port_placeholder)) },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(8.dp)
-                            )
+                             OutlinedTextField(
+                                 value = proxyPort,
+                                 onValueChange = { newValue ->
+                                     val digits = newValue.filter { it.isDigit() }
+                                     if (digits.length <= 5) {
+                                         val num = digits.toIntOrNull()
+                                         if (num == null || num <= 65535) {
+                                             proxyPort = digits
+                                         }
+                                     }
+                                 },
+                                 label = { Text(stringResource(R.string.admin_proxy_socks5_port)) },
+                                 placeholder = { Text(stringResource(R.string.admin_proxy_socks5_port_placeholder)) },
+                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                 singleLine = true,
+                                 modifier = Modifier.fillMaxWidth(),
+                                 shape = RoundedCornerShape(8.dp)
+                             )
                             Spacer(Modifier.height(8.dp))
                             OutlinedTextField(
                                 value = proxyUser,

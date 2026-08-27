@@ -19,6 +19,7 @@ import android.os.PowerManager
 import android.service.quicksettings.TileService
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import appctr.Appctr
 import appctr.Closer
 import appctr.StartOptions
@@ -27,6 +28,47 @@ import com.google.gson.Gson
 class TailscaledService : Service() {
     companion object {
         const val ACTION_APPLY_SETTINGS = "APPLY_SETTINGS"
+        const val ACTION_STATUS_CHANGED = "io.github.bropines.tailscaled.STATUS_CHANGED"
+        const val ALIAS_STATUS_CHANGED = "io.github.bropines.tailscaled.STATUS"
+
+        fun sendStatusBroadcast(context: Context, statusOverride: String? = null) {
+            try {
+                val isRunning = Appctr.isRunning()
+                val activeAccount = AccountManager.getActiveAccount(context)
+                val profilePrefs = context.getSharedPreferences("appctr_${activeAccount.id}", Context.MODE_PRIVATE)
+                val exitNodeIp = profilePrefs.getString("exit_node_ip", "") ?: ""
+                val statusText = statusOverride ?: if (isRunning) "ACTIVE" else "STOPPED"
+
+                val intent = Intent(ACTION_STATUS_CHANGED).apply {
+                    setPackage(context.packageName)
+                    putExtra("running", isRunning)
+                    putExtra("status", statusText)
+                    putExtra("account", activeAccount.name)
+                    putExtra("account_id", activeAccount.id)
+                    putExtra("exit_node", exitNodeIp)
+                    putExtra("tun_enabled", GlobalSettings.isTunModeEnabled(context))
+                    putExtra("byedpi_enabled", GlobalSettings.isCPByeDpiEnabled(context))
+                }
+                context.sendBroadcast(intent)
+
+                val aliasIntent = Intent(ALIAS_STATUS_CHANGED).apply {
+                    setPackage(context.packageName)
+                    putExtra("running", isRunning)
+                    putExtra("status", statusText)
+                    putExtra("account", activeAccount.name)
+                    putExtra("account_id", activeAccount.id)
+                    putExtra("exit_node", exitNodeIp)
+                    putExtra("tun_enabled", GlobalSettings.isTunModeEnabled(context))
+                    putExtra("byedpi_enabled", GlobalSettings.isCPByeDpiEnabled(context))
+                }
+                context.sendBroadcast(aliasIntent)
+
+                updateAllWidgets(context)
+                forceAppWidgetUpdate(context)
+            } catch (e: Exception) {
+                Log.e("TailscaledService", "Failed to send status broadcast: ${e.message}")
+            }
+        }
     }
     private val TAG = "TailscaledService"
     private val notificationManager by lazy { getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager }
@@ -34,18 +76,45 @@ class TailscaledService : Service() {
     private var byedpiProxyAddress: Pair<String, Int>? = null
     private var lastStartedFlags: String? = null
     private var lastStartedIpv6Disabled: Boolean? = null
+    private var dnsRedirectApplied = false
     
     private val refreshHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val refreshRunnable = object : Runnable {
         override fun run() {
-            // Больше не нужно вручную проверять и сбрасывать Exit Nodes здесь,
-            // так как LocalAPI синхронизация в ApplySettings позаботится о профиле-зависимых настройках.
+            // No longer need to manually check and reset Exit Nodes here,
+            // as LocalAPI synchronization in ApplySettings handles profile-dependent settings.
             val activeAccount = AccountManager.getActiveAccount(this@TailscaledService)
             val profilePrefs = getSharedPreferences("appctr_${activeAccount.id}", Context.MODE_PRIVATE)
-            val interval = profilePrefs.getString("refresh_interval", "15000")?.toLongOrNull() ?: 15000L
+            val defaultInterval = profilePrefs.getString("refresh_interval", "15000")?.toLongOrNull() ?: 15000L
+            var interval = defaultInterval
+
+            val isRunning = Appctr.isRunning()
+            val backendState = if (isRunning) {
+                try { Appctr.getBackendState() } catch (e: Exception) { "" }
+            } else ""
+
+            if (GlobalSettings.isRootModeEnabled(this@TailscaledService) && GlobalSettings.isRootTunEnabled(this@TailscaledService)) {
+                if (isRunning && backendState == "Running") {
+                    if (!dnsRedirectApplied) {
+                        Log.i(TAG, "Daemon is Running. Applying Root tailscale0 routing.")
+                        RootUtils.applyTailscale0Routing()
+                        dnsRedirectApplied = true
+                    }
+                    syncTailnetHosts()
+                } else {
+                    if (dnsRedirectApplied) {
+                        Log.i(TAG, "Daemon is not Running ($backendState). Cleaning up tailscale0 routing.")
+                        RootUtils.cleanupTailscale0Routing()
+                        dnsRedirectApplied = false
+                    }
+                    if (isRunning && (backendState == "NeedsLogin" || backendState == "Starting" || backendState == "NoState")) {
+                        interval = 2000L
+                    }
+                }
+            }
             
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            if (Appctr.isRunning() && powerManager.isInteractive) {
+            if (isRunning && powerManager.isInteractive) {
                 updateAllWidgets(this@TailscaledService)
             }
             
@@ -110,6 +179,10 @@ class TailscaledService : Service() {
     @Volatile private var bridgeSocksOnly = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent == null && !ProxyState.isUserLetRunning(this)) {
+            stopMe()
+            return START_NOT_STICKY
+        }
         val action = intent?.action
         if (intent?.getBooleanExtra(InviZibleBridgeReceiver.EXTRA_BRIDGE_SOCKS_ONLY, false) == true) {
             bridgeSocksOnly = true
@@ -240,32 +313,96 @@ class TailscaledService : Service() {
         Thread {
             try {
                 applicationContext.sendBroadcast(Intent("STARTING"))
-                Appctr.start(options)
+                if (GlobalSettings.isRootModeEnabled(this@TailscaledService)) {
+                    val socketFile = java.io.File(options.socketPath)
+                    val statusJson = if (socketFile.exists()) {
+                        kotlinx.coroutines.runBlocking { LocalApiClient { options.socketPath }.getStatus().getOrNull() }
+                    } else null
+
+                    val isRunningValid = statusJson != null && !statusJson.contains("\"BackendState\":\"NoState\"")
+
+                    if (isRunningValid) {
+                        Log.i(TAG, "Root daemon is already running. Attaching to existing socket with full options.")
+                        Appctr.attachExternal(options)
+                    } else {
+                        if (socketFile.exists()) {
+                            Log.w(TAG, "Root daemon is in NoState or unconfigured. Stopping stale daemon and restarting.")
+                            RootUtils.stopRootDaemon(options.socketPath)
+                        }
+                        val logsDir = java.io.File(filesDir.parentFile ?: filesDir, "logs").absolutePath
+                        val logFile = "$logsDir/tailscaled.log"
+                        val ok = RootUtils.startRootDaemon(
+                            context = this@TailscaledService,
+                            stateDir = options.statePath,
+                            socketPath = options.socketPath,
+                            logFilePath = logFile,
+                            socksAddr = options.socks5Server,
+                            httpAddr = options.httpProxy,
+                            controlProxy = options.controlProxy,
+                            taildropDir = options.taildropDir,
+                            tunMode = GlobalSettings.isRootTunEnabled(this@TailscaledService)
+                        )
+
+                        if (ok) {
+                            Appctr.attachExternal(options)
+                        }
+                    }
+                } else {
+                    Appctr.setExternalSocketPath("")
+                    Appctr.start(options)
+                }
                 updateNotification("Active")
                 applicationContext.sendBroadcast(Intent("START"))
-                // audit LOW #19: confirm to InviZible only now that Appctr.start() has returned
-                // and the SOCKS listener is actually up. If this never arrives, InviZible's
-                // start-timeout fires and rolls its config back (audit #9) — which is the correct
-                // outcome for a start that genuinely failed.
-                InviZibleBridgeReceiver.broadcastStatus(this@TailscaledService, true)
-                
-                try { Thread.sleep(2500) } catch (e: Exception) {}
-                applyTagsAndRoutes(this@TailscaledService)
-                applyTaildrive(this@TailscaledService)
-                
-                // When started by the InviZible Pro Max bridge, force SOCKS-only: InviZible owns
-                // the system VpnService slot, and TailSocks' TUN mode would seize it (audit HIGH #3),
-                // revoking InviZible's tunnel and risking direct egress of all traffic.
-                if (bridgeSocksOnly) {
-                    stopTunMode()
-                } else if (GlobalSettings.isTunModeEnabled(this@TailscaledService)) {
-                    startTunMode()
+                forceAppWidgetUpdate(this@TailscaledService)
+                if (waitForDaemonReady()) {
+                    Log.d(TAG, "Daemon readiness checkpoint reached. Launching auxiliary modules...")
+
+                    // audit LOW #19: confirm to InviZible only once the daemon is genuinely up.
+                    // This used to fire synchronously in onStartCommand, before bring-up had even
+                    // started. Upstream's readiness checkpoint is a stronger guarantee than the
+                    // fixed sleep this replaced, so the bridge confirmation now rides on it.
+                    InviZibleBridgeReceiver.broadcastStatus(this@TailscaledService, true)
+
+                    applyTagsAndRoutes(this@TailscaledService)
+                    applyTaildrive(this@TailscaledService)
+
+                    // audit HIGH #3: when the InviZible Pro Max bridge started us, force
+                    // SOCKS-only. InviZible owns the system VpnService slot and TUN mode would
+                    // seize it, revoking InviZible's tunnel and risking direct egress.
+                    if (bridgeSocksOnly) {
+                        stopTunMode()
+                    } else if (GlobalSettings.isTunModeEnabled(this@TailscaledService)
+                        && !GlobalSettings.isRootModeEnabled(this@TailscaledService)
+                    ) {
+                        startTunMode()
+                    }
+                } else {
+                    Log.w(TAG, "Daemon readiness checkpoint timed out.")
+                    // audit LOW #19: deliberately do NOT confirm a start we cannot vouch for.
+                    // InviZible's start-timeout fires and rolls its config back (audit #9), which
+                    // is the correct outcome for a start that never came up.
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Start failed", e)
                 stopMe()
             }
         }.start()
+    }
+
+    private fun waitForDaemonReady(timeoutMs: Long = 10000L): Boolean {
+        val startTime = System.currentTimeMillis()
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            try {
+                val st = Appctr.getStatusJSON(false)
+                if (st.isNotBlank() && st.contains("BackendState")) {
+                    return true
+                }
+            } catch (e: Exception) {
+                // Socket / daemon not responsive yet
+            }
+            try { Thread.sleep(300) } catch (e: Exception) {}
+        }
+        return false
     }
 
     private fun buildStartOptions(): StartOptions {
@@ -276,7 +413,14 @@ class TailscaledService : Service() {
 
         val accRoutes = GlobalSettings.getBoolean(this@TailscaledService, "accept_routes", false)
         val accDNS = GlobalSettings.getBoolean(this@TailscaledService, "accept_dns", true)
-        val host = profilePrefs.getString("hostname", "") ?: ""
+        var host = profilePrefs.getString("hostname", "") ?: ""
+        if (host.isBlank()) {
+            val defaultHost = android.os.Build.MODEL.replace(" ", "-").lowercase().replace(Regex("[^a-z0-9-]"), "")
+            if (defaultHost.isNotBlank()) {
+                host = defaultHost
+                profilePrefs.edit().putString("hostname", defaultHost).apply()
+            }
+        }
 
         val byedpiEnabled = GlobalSettings.isCPByeDpiEnabled(this@TailscaledService)
         val flags = GlobalSettings.getCPByeDpiFlags(this@TailscaledService)
@@ -327,7 +471,7 @@ class TailscaledService : Service() {
             doReset      = profilePrefs.getBoolean("do_reset", false)
             if (doReset) profilePrefs.edit().putBoolean("do_reset", false).apply()
 
-            // Передаем флаги напрямую для LocalAPI синхронизации в Go
+            // Pass flags directly for LocalAPI synchronization in Go
             hostname = host
             acceptRoutes = accRoutes
             acceptDNS = accDNS
@@ -342,9 +486,9 @@ class TailscaledService : Service() {
             argsBuilder.append("--accept-routes=$accRoutes ")
             argsBuilder.append("--accept-dns=$accDNS ")
             
-            // Exit Nodes теперь управляются динамически через LocalAPI (Appctr.setPrefs)
-            // в SettingsActivity. Мы больше не передаем их в 'up', чтобы не перезапускать 
-            // конфигурацию без необходимости.
+            // Exit Nodes are now managed dynamically via LocalAPI (Appctr.setPrefs)
+            // in SettingsActivity. We no longer pass them in 'up' to avoid restarting
+            // configuration unnecessarily.
 
             if (profilePrefs.getBoolean("advertise_exit_node", false)) {
                 argsBuilder.append("--advertise-exit-node=true ")
@@ -369,22 +513,32 @@ class TailscaledService : Service() {
         refreshHandler.removeCallbacks(refreshRunnable)
         try { Appctr.stopDriveServer() } catch (e: Exception) {}
         try { Appctr.stopDriveProxy() } catch (e: Exception) {}
-        Appctr.stop()
+        if (GlobalSettings.isRootModeEnabled(this)) {
+            val socketPath = "${filesDir.absolutePath}/tailscaled.sock"
+            RootUtils.cleanupTailscale0Routing()
+            Appctr.setExternalSocketPath("")
+            if (GlobalSettings.shouldKillRootDaemonOnStop(this)) {
+                RootUtils.stopRootDaemon(socketPath)
+            }
+        } else {
+            Appctr.stop()
+        }
         try { ByeDpiProxy.stop() } catch (e: Exception) {}
         byedpiProxyAddress = null
         lastStartedFlags = null
         lastStartedIpv6Disabled = null
-        try { Runtime.getRuntime().exec("killall tailscaled") } catch (e: Exception) {}
         if (wakeLock?.isHeld == true) wakeLock?.release()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         updateTile()
         applicationContext.sendBroadcast(Intent("STOP"))
+        sendStatusBroadcast(this, "STOPPED")
     }
     
     private fun updateTile() {
         TileService.requestListeningState(this, ComponentName(this, ProxyTileService::class.java))
         updateAllWidgets(this@TailscaledService)
+        forceAppWidgetUpdate(this@TailscaledService)
     }
     private fun updateNotification(status: String) = notificationManager.notify(1, buildNotification(status))
 
@@ -431,7 +585,14 @@ class TailscaledService : Service() {
     private fun applyTaildrive(context: Context) {
         val activeAccount = AccountManager.getActiveAccount(context)
         val profilePrefs = context.getSharedPreferences("appctr_${activeAccount.id}", Context.MODE_PRIVATE)
-        val taildriveEnabled = profilePrefs.getBoolean("taildrive_enabled", false)
+        if (!profilePrefs.contains("taildrive_enabled")) {
+            profilePrefs.edit()
+                .putBoolean("taildrive_enabled", true)
+                .putString("taildrive_shares", "[{\"name\":\"Downloads\",\"path\":\"/storage/emulated/0/Download\"}]")
+                .apply()
+        }
+
+        val taildriveEnabled = profilePrefs.getBoolean("taildrive_enabled", true)
         val proxyEnabled = profilePrefs.getBoolean("taildrive_proxy_enabled", false)
 
         if (!Appctr.isRunning()) {
@@ -489,12 +650,22 @@ class TailscaledService : Service() {
 
     private fun startTunMode() {
         try {
-            val intent = Intent(this, TunPermissionActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val prepareIntent = android.net.VpnService.prepare(this)
+            if (prepareIntent == null) {
+                Log.d(TAG, "VPN permission already granted, starting TunVpnService directly")
+                val tunIntent = Intent(this, TunVpnService::class.java).apply {
+                    action = TunVpnService.ACTION_START
+                }
+                ContextCompat.startForegroundService(this, tunIntent)
+            } else {
+                Log.d(TAG, "VPN permission required, launching TunPermissionActivity")
+                val intent = Intent(this, TunPermissionActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(intent)
             }
-            startActivity(intent)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start TunPermissionActivity", e)
+            Log.e(TAG, "Failed to start TUN mode", e)
         }
     }
 
@@ -512,8 +683,73 @@ class TailscaledService : Service() {
         }
     }
 
+    private var lastHostsHash: Int = 0
+
+    private fun syncTailnetHosts() {
+        if (!GlobalSettings.isRootModeEnabled(this) || !GlobalSettings.isRootTunEnabled(this)) return
+        
+        Thread {
+            try {
+                val statusJson = Appctr.getStatusJSON(true)
+                if (statusJson.isNullOrEmpty()) return@Thread
+                
+                val gson = Gson()
+                val mapType = object : com.google.gson.reflect.TypeToken<Map<String, Any>>() {}.type
+                val root: Map<String, Any> = gson.fromJson(statusJson, mapType)
+                val peers = root["Peer"] as? Map<String, Any> ?: emptyMap()
+                
+                val hostsMap = mutableMapOf<String, String>()
+                
+                // Add self
+                val self = root["Self"] as? Map<String, Any>
+                if (self != null) {
+                    val dnsName = (self["DNSName"] as? String)?.removeSuffix(".")
+                    val ips = self["TailscaleIPs"] as? List<*>
+                    if (!dnsName.isNullOrEmpty() && ips != null) {
+                        for (ip in ips) {
+                            val ipStr = ip?.toString() ?: continue
+                            hostsMap[ipStr] = dnsName
+                        }
+                    }
+                }
+                
+                // Add peers
+                for ((_, peerData) in peers) {
+                    val p = peerData as? Map<String, Any> ?: continue
+                    val dnsName = (p["DNSName"] as? String)?.removeSuffix(".")
+                    val ips = p["TailscaleIPs"] as? List<*>
+                    if (!dnsName.isNullOrEmpty() && ips != null) {
+                        for (ip in ips) {
+                            val ipStr = ip?.toString() ?: continue
+                            hostsMap[ipStr] = dnsName
+                        }
+                    }
+                }
+                
+                val currentHash = hostsMap.hashCode()
+                if (currentHash != lastHostsHash && hostsMap.isNotEmpty()) {
+                    Log.i(TAG, "Syncing ${hostsMap.size} tailnet hosts to /system/etc/hosts")
+                    if (RootUtils.updateRootHosts(hostsMap)) {
+                        lastHostsHash = currentHash
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to sync tailnet hosts: ${e.message}")
+            }
+        }.start()
+    }
+
     override fun onDestroy() {
-        Appctr.stop()
+        if (GlobalSettings.isRootModeEnabled(this)) {
+            val socketPath = "${filesDir.absolutePath}/tailscaled.sock"
+            RootUtils.cleanupTailscale0Routing()
+            Appctr.setExternalSocketPath("")
+            if (!RootUtils.isServiceScriptInstalled()) {
+                RootUtils.stopRootDaemon(socketPath)
+            }
+        } else {
+            Appctr.stop()
+        }
         try { ByeDpiProxy.stop() } catch (e: Exception) {}
         byedpiProxyAddress = null
         lastStartedFlags = null

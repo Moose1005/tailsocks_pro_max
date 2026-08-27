@@ -35,6 +35,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -117,6 +119,14 @@ fun generateRandomString(length: Int = 12): String {
     return (1..length).map { allowedChars.random() }.joinToString("")
 }
 
+fun generateRandomLoopbackAddress(): String {
+    val x = (1..254).random()
+    val y = (1..254).random()
+    val z = (1..254).random()
+    val port = (1024..65535).random()
+    return "127.$x.$y.$z:$port"
+}
+
 data class PresetItem(val id: String, val color: Color, val name: String)
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -141,10 +151,12 @@ fun SettingsScreen(
     val tabs = listOf(
         Pair(stringResource(R.string.settings_tab_app), Icons.Default.Palette),
         Pair(stringResource(R.string.settings_tab_network), Icons.Default.Language),
-        Pair(stringResource(R.string.settings_tab_byedpi), Icons.Default.Shield),
         Pair(stringResource(R.string.settings_tab_core), Icons.Default.Tune),
+        Pair(stringResource(R.string.settings_tab_root), Icons.Default.Security),
+        Pair(stringResource(R.string.settings_tab_byedpi), Icons.Default.Shield),
         Pair(stringResource(R.string.settings_tab_profile), Icons.Default.AccountCircle)
     )
+
     val pagerState = rememberPagerState(pageCount = { tabs.size })
 
     // Global Settings
@@ -292,7 +304,32 @@ fun SettingsScreen(
     val fullBackupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         if (uri != null) {
             scope.launch(Dispatchers.IO) {
+                val tempStatesDir = File(context.cacheDir, "temp_states_backup")
+                var useTempStates = false
                 try {
+                    val statesDir = File(context.filesDir, "states")
+                    if (statesDir.exists() && RootUtils.isRootAvailable()) {
+                        val uid = context.applicationInfo.uid
+                        val cmd = "rm -rf \"${tempStatesDir.absolutePath}\" && " +
+                                  "mkdir -p \"${tempStatesDir.absolutePath}\" && " +
+                                  "cp -R \"${statesDir.absolutePath}/\"* \"${tempStatesDir.absolutePath}/\" && " +
+                                  "chown -R $uid:$uid \"${tempStatesDir.absolutePath}\" && " +
+                                  "chmod -R u+rwX \"${tempStatesDir.absolutePath}\""
+                        try {
+                            val process = Runtime.getRuntime().exec("su")
+                            process.outputStream.use { os ->
+                                os.write(("$cmd\nexit\n").toByteArray())
+                                os.flush()
+                            }
+                            process.waitFor()
+                            if (tempStatesDir.exists() && tempStatesDir.list()?.isNotEmpty() == true) {
+                                useTempStates = true
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("SettingsActivity", "Failed to copy states using root", e)
+                        }
+                    }
+
                     val baos = java.io.ByteArrayOutputStream()
                     java.util.zip.ZipOutputStream(baos).use { zos ->
                         val prefsDir = File(context.applicationInfo.dataDir, "shared_prefs")
@@ -304,10 +341,10 @@ fun SettingsScreen(
                                 zos.closeEntry()
                             }
                         }
-                        val statesDir = File(context.filesDir, "states")
-                        if (statesDir.exists()) {
-                            statesDir.walkTopDown().filter { it.isFile }.forEach { file ->
-                                val entryName = "files/states/${file.relativeTo(statesDir).path}"
+                        val targetStatesDir = if (useTempStates) tempStatesDir else statesDir
+                        if (targetStatesDir.exists()) {
+                            targetStatesDir.walkTopDown().filter { it.isFile }.forEach { file ->
+                                val entryName = "files/states/${file.relativeTo(targetStatesDir).path}"
                                 zos.putNextEntry(java.util.zip.ZipEntry(entryName))
                                 file.inputStream().use { it.copyTo(zos) }
                                 zos.closeEntry()
@@ -328,6 +365,9 @@ fun SettingsScreen(
                     withContext(Dispatchers.Main) { Toast.makeText(context, context.getString(R.string.settings_full_backup_failed_format, e.message), Toast.LENGTH_LONG).show() }
                 } finally {
                     backupPassword = ""
+                    try {
+                        tempStatesDir.deleteRecursively()
+                    } catch (e: Exception) {}
                 }
             }
         }
@@ -349,6 +389,27 @@ fun SettingsScreen(
                     return@launch
                 }
                 val decryptedBytes = BackupCrypto.decrypt(encryptedBytes, passwordStr.toCharArray())
+
+                // Prior to restore, if root is available, change ownership of existing states to app
+                if (RootUtils.isRootAvailable()) {
+                    val uid = context.applicationInfo.uid
+                    val statesDir = File(context.filesDir, "states")
+                    if (statesDir.exists()) {
+                        val cmd = "chown -R $uid:$uid \"${statesDir.absolutePath}\" && " +
+                                  "chmod -R u+rwX \"${statesDir.absolutePath}\""
+                        try {
+                            val process = Runtime.getRuntime().exec("su")
+                            process.outputStream.use { os ->
+                                os.write(("$cmd\nexit\n").toByteArray())
+                                os.flush()
+                            }
+                            process.waitFor()
+                        } catch (e: Exception) {
+                            android.util.Log.e("SettingsActivity", "Failed to chown states before restore", e)
+                        }
+                    }
+                }
+
                 java.util.zip.ZipInputStream(java.io.ByteArrayInputStream(decryptedBytes)).use { zis ->
                     var entry = zis.nextEntry
                     while (entry != null) {
@@ -442,50 +503,38 @@ fun SettingsScreen(
         )
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.settings_title), fontWeight = FontWeight.Bold) },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back)) } }
-            )
-        }
-    ) { padding ->
-        Column(
-            Modifier
-                .padding(padding)
-                .fillMaxSize()
-        ) {
-            // Modern Tab Layout using Chips
-            val listState = rememberLazyListState()
-            LaunchedEffect(pagerState.currentPage) {
-                listState.animateScrollToItem(pagerState.currentPage)
+    PredictiveBackContainer(
+        onBack = onBack,
+        targetTitle = stringResource(R.string.predictive_back_target_dashboard),
+        targetIcon = Icons.Default.Home
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(stringResource(R.string.settings_title), fontWeight = FontWeight.Bold) },
+                    navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back)) } }
+                )
             }
-            LazyRow(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+        ) { padding ->
+            Column(
+                Modifier
+                    .padding(padding)
+                    .fillMaxSize()
             ) {
-                items(tabs.size) { index ->
-                    val (title, icon) = tabs[index]
-                    FilterChip(
-                        selected = pagerState.currentPage == index,
-                        onClick = {
-                            scope.launch {
-                                pagerState.animateScrollToPage(index)
-                            }
-                        },
-                        label = { Text(title) },
-                        leadingIcon = { Icon(icon, null, modifier = Modifier.size(16.dp)) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    )
-                }
-            }
+                // Modern Tab Layout using Segmented Chips
+                ScrollableSlidingSegmentedChips(
+                    items = tabs.map { (title, icon) -> SegmentedChipItem(title, icon) },
+                    selectedIndex = pagerState.currentPage,
+                    onOptionSelected = { index ->
+                        scope.launch {
+                            pagerState.animateScrollToPage(index)
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    height = 40.dp
+                )
 
             HorizontalPager(
                 state = pagerState,
@@ -508,29 +557,19 @@ fun SettingsScreen(
                                     Triple("light", Icons.Default.LightMode, stringResource(R.string.settings_theme_light)),
                                     Triple("dark", Icons.Default.DarkMode, stringResource(R.string.settings_theme_dark))
                                 )
+                                val selectedThemeIdx = themeOptions.indexOfFirst { it.first == currentTheme }.coerceAtLeast(0)
                                 Column(Modifier.padding(bottom = 8.dp)) {
                                     Text(stringResource(R.string.settings_theme_title), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Spacer(Modifier.height(8.dp))
-                                    Row(
-                                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        themeOptions.forEach { (id, icon, label) ->
-                                            val isSelected = currentTheme == id
-                                            FilterChip(
-                                                selected = isSelected,
-                                                onClick = { onThemeChange(id) },
-                                                label = { Text(label) },
-                                                leadingIcon = { Icon(icon, null, modifier = Modifier.size(16.dp)) },
-                                                colors = FilterChipDefaults.filterChipColors(
-                                                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                                                )
-                                            )
-                                        }
-                                    }
+                                    SlidingSegmentedChips(
+                                        items = themeOptions.map { SegmentedChipItem(it.third, it.second) },
+                                        selectedIndex = selectedThemeIdx,
+                                        onOptionSelected = { idx -> onThemeChange(themeOptions[idx].first) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        height = 38.dp
+                                    )
                                 }
- 
+
                                 // Language selector (Chips row)
                                 var currentLang by remember { mutableStateOf(GlobalSettings.getString(context, "app_locale", "sys")) }
                                 val languageOptions = listOf(
@@ -538,38 +577,29 @@ fun SettingsScreen(
                                     Triple("en", Icons.Default.Language, stringResource(R.string.settings_lang_en)),
                                     Triple("ru", Icons.Default.Language, stringResource(R.string.settings_lang_ru))
                                 )
+                                val selectedLangIdx = languageOptions.indexOfFirst { it.first == currentLang }.coerceAtLeast(0)
                                 Spacer(Modifier.height(12.dp))
                                 Column(Modifier.padding(bottom = 8.dp)) {
                                     Text(stringResource(R.string.settings_lang_title), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Spacer(Modifier.height(8.dp))
-                                    Row(
-                                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        languageOptions.forEach { (id, icon, label) ->
-                                            val isSelected = currentLang == id
-                                            FilterChip(
-                                                selected = isSelected,
-                                                onClick = {
-                                                    currentLang = id
-                                                    GlobalSettings.setString(context, "app_locale", id)
-                                                    val localeList = if (id == "sys") {
-                                                        LocaleListCompat.getEmptyLocaleList()
-                                                    } else {
-                                                        LocaleListCompat.forLanguageTags(id)
-                                                    }
-                                                    AppCompatDelegate.setApplicationLocales(localeList)
-                                                    context.findActivity()?.recreate()
-                                                },
-                                                label = { Text(label) },
-                                                leadingIcon = { Icon(icon, null, modifier = Modifier.size(16.dp)) },
-                                                colors = FilterChipDefaults.filterChipColors(
-                                                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                                                )
-                                            )
-                                        }
-                                    }
+                                    SlidingSegmentedChips(
+                                        items = languageOptions.map { SegmentedChipItem(it.third, it.second) },
+                                        selectedIndex = selectedLangIdx,
+                                        onOptionSelected = { idx ->
+                                            val id = languageOptions[idx].first
+                                            currentLang = id
+                                            GlobalSettings.setString(context, "app_locale", id)
+                                            val localeList = if (id == "sys") {
+                                                LocaleListCompat.getEmptyLocaleList()
+                                            } else {
+                                                LocaleListCompat.forLanguageTags(id)
+                                            }
+                                            AppCompatDelegate.setApplicationLocales(localeList)
+                                            context.findActivity()?.recreate()
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        height = 38.dp
+                                    )
                                 }
 
                                 // Theme preset selector (Color Circles)
@@ -712,9 +742,9 @@ fun SettingsScreen(
                                 }
                                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
                                 SettingsClickableItem(
-                                    stringResource(R.string.settings_show_onboarding),
-                                    stringResource(R.string.settings_show_onboarding_desc),
-                                    Icons.Default.Info
+                                     stringResource(R.string.settings_show_onboarding),
+                                     stringResource(R.string.settings_show_onboarding_desc),
+                                     Icons.Default.Info
                                 ) {
                                     context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
                                         .edit()
@@ -724,11 +754,60 @@ fun SettingsScreen(
                                     context.findActivity()?.finish()
                                 }
                             }
+
+                            Spacer(Modifier.height(12.dp))
+
+                            var automationEnabled by remember { mutableStateOf(GlobalSettings.isAutomationEnabled(context)) }
+                            var automationSecret by remember { mutableStateOf(GlobalSettings.getAutomationSecret(context)) }
+
+                            SettingsCard(title = "Tasker & Automation") {
+                                SettingsSwitchItem(
+                                    title = "Allow External Automation",
+                                    subtitle = "Enable background control via Broadcast Intents (Tasker, MacroDroid, ADB)",
+                                    icon = Icons.Default.SmartButton,
+                                    checked = automationEnabled
+                                ) {
+                                    automationEnabled = it
+                                    GlobalSettings.setAutomationEnabled(context, it)
+                                }
+
+                                if (automationEnabled) {
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                                     CompactTextField(
+                                         value = automationSecret,
+                                         onValueChange = {
+                                             automationSecret = it
+                                             GlobalSettings.setAutomationSecret(context, it)
+                                         },
+                                         label = "Security Secret Token (Optional)",
+                                         placeholder = "Leave empty to disable token authentication",
+                                         leadingIcon = { Icon(Icons.Default.Key, null) },
+                                         trailingIcon = {
+                                             if (automationSecret.isNotEmpty()) {
+                                                 IconButton(onClick = {
+                                                     automationSecret = ""
+                                                     GlobalSettings.setAutomationSecret(context, "")
+                                                 }) {
+                                                     Icon(Icons.Default.Clear, null)
+                                                 }
+                                             }
+                                         }
+                                     )
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        text = if (automationSecret.isEmpty()) "No secret token set. Any automation app can send intents." else "Token active. Intents must include extra: secret=\"$automationSecret\"",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (automationSecret.isEmpty()) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
                         }
 
-                        1 -> { // TAB 1: Network & Proxy
+                        1 -> { // TAB 1: Network & Proxy (SOCKS5, HTTP Proxy, Control Proxy, Non-Root TUN)
+                            val isRootModeActive = GlobalSettings.isRootModeEnabled(context)
+
                             SettingsCard(title = stringResource(R.string.settings_sect_socks5)) {
-                                SettingsEditItem(stringResource(R.string.settings_socks5_address_title), socks5, Icons.Default.Language) { socks5 = it; saveGlobalPref("socks5", it) }
+                                SettingsEditItem(stringResource(R.string.settings_socks5_address_title), socks5, Icons.Default.Language, onAction = { generateRandomLoopbackAddress() }, actionIcon = Icons.Default.Casino) { socks5 = it; saveGlobalPref("socks5", it) }
                                 SettingsEditItem(stringResource(R.string.settings_socks5_username_title), socks5User, Icons.Default.Person, onAction = { generateRandomString(8) }, actionIcon = Icons.Default.Casino) { socks5User = it; saveGlobalPref("socks5_user", it) }
                                 SettingsEditItem(stringResource(R.string.settings_socks5_password_title), socks5Pass, Icons.Default.Password, onAction = { generateRandomString(12) }, actionIcon = Icons.Default.Casino) { socks5Pass = it; saveGlobalPref("socks5_pass", it) }
                                 Spacer(Modifier.height(12.dp))
@@ -742,13 +821,43 @@ fun SettingsScreen(
                             Spacer(Modifier.height(12.dp))
 
                             SettingsCard(title = stringResource(R.string.settings_sect_http)) {
-                                SettingsEditItem(stringResource(R.string.settings_http_address_title), httpProxy, Icons.Default.Http, placeholder = "127.0.0.1:8080") { httpProxy = it; saveGlobalPref("httpproxy", it) }
-                                Text(
-                                    text = stringResource(R.string.settings_http_desc),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 8.dp)
-                                )
+                                val isHttpEnabled = httpProxy.isNotEmpty()
+                                SettingsSwitchItem(
+                                    title = stringResource(R.string.settings_http_enable_title),
+                                    subtitle = stringResource(R.string.settings_http_enable_desc),
+                                    icon = Icons.Default.Http,
+                                    checked = isHttpEnabled
+                                ) { enabled ->
+                                    if (enabled) {
+                                        val defaultAddr = "127.0.0.1:8080"
+                                        httpProxy = defaultAddr
+                                        saveGlobalPref("httpproxy", defaultAddr)
+                                    } else {
+                                        httpProxy = ""
+                                        saveGlobalPref("httpproxy", "")
+                                    }
+                                }
+
+                                if (isHttpEnabled) {
+                                    HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                                    SettingsEditItem(
+                                        title = stringResource(R.string.settings_http_address_title),
+                                        value = httpProxy,
+                                        icon = Icons.Default.Http,
+                                        placeholder = "127.0.0.1:8080",
+                                        onAction = { generateRandomLoopbackAddress() },
+                                        actionIcon = Icons.Default.Casino
+                                    ) { 
+                                        httpProxy = it
+                                        saveGlobalPref("httpproxy", it) 
+                                    }
+                                    Text(
+                                        text = stringResource(R.string.settings_http_desc),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                        modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 8.dp)
+                                    )
+                                }
                             }
 
                             Spacer(Modifier.height(12.dp))
@@ -768,6 +877,68 @@ fun SettingsScreen(
                             }
 
                             Spacer(Modifier.height(12.dp))
+
+                            SettingsCard(title = stringResource(R.string.settings_sect_tun_mode)) {
+                                SettingsSwitchItem(
+                                    title = stringResource(R.string.settings_tun_enable_title),
+                                    subtitle = if (isRootModeActive) stringResource(R.string.settings_root_disabled_tun_note) else stringResource(R.string.settings_tun_enable_desc),
+                                    icon = Icons.Default.VpnLock,
+                                    checked = if (isRootModeActive) false else tunModeEnabled,
+                                    enabled = !isRootModeActive
+                                ) {
+                                    tunModeEnabled = it
+                                    saveGlobalPref("tun_mode_enabled", it)
+                                }
+
+                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                                SettingsSwitchItem(
+                                    title = stringResource(R.string.settings_tun_ipv6_title),
+                                    subtitle = if (isRootModeActive) stringResource(R.string.settings_root_disabled_general_note) else stringResource(R.string.settings_tun_ipv6_desc),
+                                    icon = Icons.Default.Language,
+                                    checked = tunIpv6Enabled,
+                                    enabled = !isRootModeActive
+                                ) {
+                                    tunIpv6Enabled = it
+                                    saveGlobalPref("tun_ipv6_enabled", it)
+                                }
+
+                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                                SettingsEditItem(
+                                    title = stringResource(R.string.settings_tun_address_title),
+                                    value = tunAddress,
+                                    icon = Icons.Default.Settings,
+                                    placeholder = "10.0.0.1/8",
+                                    description = stringResource(R.string.settings_tun_address_desc)
+                                ) {
+                                    tunAddress = it
+                                    saveGlobalPref("tun_address", it)
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                                SettingsEditItem(
+                                    title = stringResource(R.string.settings_tun_excluded_cidrs_title),
+                                    value = tunExcludedCIDRs,
+                                    icon = Icons.Default.Block,
+                                    placeholder = "192.168.0.0/16, 10.0.0.0/8",
+                                    description = stringResource(R.string.settings_tun_excluded_cidrs_desc)
+                                ) {
+                                    tunExcludedCIDRs = it
+                                    saveGlobalPref("tun_excluded_cidrs", it)
+                                }
+
+                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                                SettingsClickableItem(
+                                    title = stringResource(R.string.settings_tun_excluded_apps_title),
+                                    subtitle = if (isRootModeActive) stringResource(R.string.settings_root_disabled_general_note) else stringResource(R.string.settings_tun_excluded_apps_desc, tunExcludedApps.size),
+                                    icon = Icons.Default.Apps,
+                                    enabled = !isRootModeActive
+                                ) {
+                                    excludedAppsLauncher.launch(Intent(context, TunExcludedAppsActivity::class.java))
+                                }
+                            }
+                        }
+
+                        2 -> { // TAB 2: TS-Core Settings
+                            val isRootModeActive = GlobalSettings.isRootModeEnabled(context)
 
                             SettingsCard(title = stringResource(R.string.settings_sect_service_ad)) {
                                 SettingsEditItem(
@@ -804,69 +975,320 @@ fun SettingsScreen(
 
                             Spacer(Modifier.height(12.dp))
 
-                            SettingsCard(title = stringResource(R.string.settings_sect_tun_mode)) {
-                                SettingsSwitchItem(
-                                    title = stringResource(R.string.settings_tun_enable_title),
-                                    subtitle = stringResource(R.string.settings_tun_enable_desc),
-                                    icon = Icons.Default.VpnLock,
-                                    checked = tunModeEnabled
-                                ) {
-                                    tunModeEnabled = it
-                                    saveGlobalPref("tun_mode_enabled", it)
-                                }
+                            SettingsCard(title = stringResource(R.string.settings_sect_dns_proxy)) {
+                                SettingsEditItem(
+                                    title = stringResource(R.string.settings_dns_proxy_address_title),
+                                    value = dnsProxy,
+                                    icon = Icons.Default.Toll,
+                                    enabled = !isRootModeActive,
+                                    description = if (isRootModeActive) stringResource(R.string.settings_root_disabled_general_note) else ""
+                                ) { dnsProxy = it; saveGlobalPref("dns_proxy", it) }
+                            }
 
-                                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-                                 SettingsSwitchItem(
-                                     title = stringResource(R.string.settings_tun_ipv6_title),
-                                     subtitle = stringResource(R.string.settings_tun_ipv6_desc),
-                                     icon = Icons.Default.Language,
-                                     checked = tunIpv6Enabled
-                                 ) {
-                                     tunIpv6Enabled = it
-                                     saveGlobalPref("tun_ipv6_enabled", it)
-                                 }
+                            Spacer(Modifier.height(12.dp))
 
-                                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-                                 SettingsEditItem(
-                                     title = stringResource(R.string.settings_tun_address_title),
-                                     value = tunAddress,
-                                     icon = Icons.Default.Settings,
-                                     placeholder = "10.0.0.1/8",
-                                     description = stringResource(R.string.settings_tun_address_desc)
-                                 ) {
-                                     tunAddress = it
-                                     saveGlobalPref("tun_address", it)
-                                 }
-                                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-                                 SettingsEditItem(
-                                     title = stringResource(R.string.settings_tun_excluded_cidrs_title),
-                                     value = tunExcludedCIDRs,
-                                     icon = Icons.Default.Block,
-                                     placeholder = "192.168.0.0/16, 10.0.0.0/8",
-                                     description = stringResource(R.string.settings_tun_excluded_cidrs_desc)
-                                 ) {
-                                     tunExcludedCIDRs = it
-                                     saveGlobalPref("tun_excluded_cidrs", it)
-                                 }
+                            SettingsCard(title = stringResource(R.string.settings_sect_fallback_dns)) {
+                                SettingsEditItem(stringResource(R.string.settings_dns_fallbacks_title), dnsFallbacks, Icons.AutoMirrored.Filled.List, placeholder = stringResource(R.string.settings_dns_fallbacks_placeholder)) { dnsFallbacks = it; saveGlobalPref("dns_fallbacks", it) }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                                SettingsEditItem(stringResource(R.string.settings_doh_fallback_title), dohUrl, Icons.Default.Link, placeholder = stringResource(R.string.settings_doh_fallback_placeholder)) { dohUrl = it; saveGlobalPref("doh_url", it) }
+                            }
 
-                                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-                                 SettingsClickableItem(
-                                     title = stringResource(R.string.settings_tun_excluded_apps_title),
-                                     subtitle = stringResource(R.string.settings_tun_excluded_apps_desc, tunExcludedApps.size),
-                                     icon = Icons.Default.Apps
-                                 ) {
-                                     excludedAppsLauncher.launch(Intent(context, TunExcludedAppsActivity::class.java))
-                                 }
+                            Spacer(Modifier.height(12.dp))
+
+                            SettingsCard(title = stringResource(R.string.settings_sect_flags_logs)) {
+                                SettingsSwitchItem(stringResource(R.string.settings_accept_routes_title), stringResource(R.string.settings_accept_routes_desc), Icons.Default.Map, acceptRoutes) { acceptRoutes = it; saveGlobalPref("accept_routes", it) }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                                SettingsSwitchItem(stringResource(R.string.settings_accept_dns_title), stringResource(R.string.settings_accept_dns_desc), Icons.Default.Dns, acceptDns) { acceptDns = it; saveGlobalPref("accept_dns", it) }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                                SettingsSwitchItem(stringResource(R.string.settings_force_bg_title), stringResource(R.string.settings_force_bg_desc), Icons.Default.BatteryFull, forceBg) { forceBg = it; saveGlobalPref("force_bg", it) }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                                SettingsSwitchItem(stringResource(R.string.settings_detailed_logs_title), stringResource(R.string.settings_detailed_logs_desc), Icons.Default.BugReport, detailedLogs) { detailedLogs = it; saveGlobalPref("detailed_logs", it) }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+                                SettingsEditItem(stringResource(R.string.settings_extra_args_title), extraArgs, Icons.Default.Code, stringResource(R.string.settings_extra_args_placeholder)) { extraArgs = it; saveGlobalPref("extra_args_raw", it) }
                             }
                         }
 
-                        2 -> { // TAB 2: DPI Bypass (ByeByeDPI)
+                        3 -> { // TAB 3: Root Mode & System Service
+                            var rootModeEnabled by remember { mutableStateOf(GlobalSettings.isRootModeEnabled(context)) }
+                            var rootTunEnabled by remember { mutableStateOf(GlobalSettings.isRootTunEnabled(context)) }
+                            var serviceScriptInstalled by remember { mutableStateOf(RootUtils.isServiceScriptInstalled()) }
+                            var cliInstalled by remember { mutableStateOf(RootUtils.isTailscaleCliInstalled()) }
+                            var killDaemonOnStop by remember { mutableStateOf(GlobalSettings.shouldKillRootDaemonOnStop(context)) }
+                            var showRootWarningDialog by remember { mutableStateOf(false) }
+
+                            if (showRootWarningDialog) {
+                                AlertDialog(
+                                    onDismissRequest = { showRootWarningDialog = false },
+                                    title = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.Warning,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.size(24.dp)
+                                            )
+                                            Spacer(Modifier.width(8.dp))
+                                            Text(
+                                                text = stringResource(R.string.settings_root_warning_dialog_title),
+                                                style = MaterialTheme.typography.titleMedium
+                                            )
+                                        }
+                                    },
+                                    text = {
+                                        Text(
+                                            text = stringResource(R.string.settings_root_warning_dialog_body),
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    },
+                                    confirmButton = {
+                                        Button(
+                                            onClick = {
+                                                showRootWarningDialog = false
+                                                if (RootUtils.isRootAvailable()) {
+                                                    rootModeEnabled = true
+                                                    GlobalSettings.setRootModeEnabled(context, true)
+                                                    if (GlobalSettings.isTunModeEnabled(context)) {
+                                                        GlobalSettings.setRootTunEnabled(context, true)
+                                                        rootTunEnabled = true
+                                                    }
+                                                    Toast.makeText(context, "Root Mode enabled", Toast.LENGTH_SHORT).show()
+                                                    if (Appctr.isRunning()) {
+                                                        val intent = Intent(context, TailscaledService::class.java).apply { action = "RESTART_ACTION" }
+                                                        context.startService(intent)
+                                                    }
+                                                } else {
+                                                    Toast.makeText(context, "Root access (su) not granted or unavailable", Toast.LENGTH_LONG).show()
+                                                }
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                                        ) {
+                                            Text(stringResource(R.string.settings_root_warning_dialog_confirm))
+                                        }
+                                    },
+                                    dismissButton = {
+                                        TextButton(onClick = { showRootWarningDialog = false }) {
+                                            Text(stringResource(R.string.settings_root_warning_dialog_cancel))
+                                        }
+                                    }
+                                )
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 12.dp)
+                                    .background(
+                                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f),
+                                        shape = RoundedCornerShape(12.dp)
+                                    )
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Warning,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    text = stringResource(R.string.settings_root_banner_warning),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            SettingsCard(title = stringResource(R.string.settings_root_sect_title)) {
+                                SettingsSwitchItem(
+                                    title = stringResource(R.string.settings_root_enable_title),
+                                    subtitle = stringResource(R.string.settings_root_enable_desc),
+                                    icon = Icons.Default.Security,
+                                    checked = rootModeEnabled
+                                ) {
+                                    if (it) {
+                                        showRootWarningDialog = true
+                                    } else {
+                                        rootModeEnabled = false
+                                        GlobalSettings.setRootModeEnabled(context, false)
+                                        if (serviceScriptInstalled) {
+                                            RootUtils.setServiceScriptInstalled(context, false)
+                                            serviceScriptInstalled = false
+                                        }
+                                        Toast.makeText(context, "Root Mode disabled", Toast.LENGTH_SHORT).show()
+                                        if (Appctr.isRunning()) {
+                                            val intent = Intent(context, TailscaledService::class.java).apply { action = "RESTART_ACTION" }
+                                            context.startService(intent)
+                                        }
+                                    }
+                                }
+
+                                if (rootModeEnabled) {
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+
+                                    SettingsSwitchItem(
+                                        title = "Native Linux TUN (tailscale0)",
+                                        subtitle = if (rootTunEnabled)
+                                            "Creates native Linux kernel network interface tailscale0 via su. Leaves Android VpnService slot 100% free."
+                                            else "Runs daemon in SOCKS5/Proxy mode via su (uses SOCKS settings from Network tab).",
+                                        icon = Icons.Default.VpnLock,
+                                        checked = rootTunEnabled
+                                    ) { enabled ->
+                                        rootTunEnabled = enabled
+                                        GlobalSettings.setRootTunEnabled(context, enabled)
+                                        if (Appctr.isRunning()) {
+                                            val intent = Intent(context, TailscaledService::class.java).apply { action = "RESTART_ACTION" }
+                                            context.startService(intent)
+                                        }
+                                    }
+
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+
+                                    SettingsSwitchItem(
+                                        title = stringResource(R.string.settings_root_service_title),
+                                        subtitle = stringResource(R.string.settings_root_service_desc),
+                                        icon = Icons.Default.Build,
+                                        checked = serviceScriptInstalled
+                                    ) {
+                                        val success = RootUtils.setServiceScriptInstalled(context, it)
+                                        if (success) {
+                                            serviceScriptInstalled = it
+                                            Toast.makeText(context, if (it) "Service script installed to service.d" else "Service script removed", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(context, "Failed to manage service.d script", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+
+                                    if (serviceScriptInstalled) {
+                                        val coroutineScope = rememberCoroutineScope()
+                                        val msgOk = stringResource(R.string.settings_root_script_reinstalled)
+                                        val msgFail = stringResource(R.string.error_generic, "reinstall failed")
+                                        var reinstallStatus by remember { mutableStateOf<String?>(null) }
+                                        var isReinstallOk by remember { mutableStateOf(true) }
+
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(start = 16.dp, end = 16.dp, bottom = 4.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            reinstallStatus?.let { status ->
+                                                Text(
+                                                    text = status,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = if (isReinstallOk) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                                                )
+                                            } ?: Spacer(Modifier.width(1.dp))
+
+                                            OutlinedButton(
+                                                onClick = {
+                                                    coroutineScope.launch(Dispatchers.IO) {
+                                                        val success = RootUtils.setServiceScriptInstalled(context, true)
+                                                        withContext(Dispatchers.Main) {
+                                                            isReinstallOk = success
+                                                            reinstallStatus = if (success) msgOk else msgFail
+                                                            Toast.makeText(context, if (success) msgOk else msgFail, Toast.LENGTH_SHORT).show()
+                                                        }
+                                                    }
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                            ) {
+                                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text(stringResource(R.string.settings_root_script_reinstall), style = MaterialTheme.typography.labelMedium)
+                                            }
+                                        }
+                                    }
+
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+
+                                    SettingsSwitchItem(
+                                        title = stringResource(R.string.settings_root_cli_title),
+                                        subtitle = stringResource(R.string.settings_root_cli_desc),
+                                        icon = Icons.Default.Terminal,
+                                        checked = cliInstalled
+                                    ) {
+                                        val success = RootUtils.setTailscaleCliInstalled(context, it)
+                                        if (success) {
+                                            cliInstalled = it
+                                            Toast.makeText(context, if (it) "CLI wrapper installed to /system/bin/tailscale" else "CLI wrapper removed", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(context, "Failed to manage CLI wrapper", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+
+                                    SettingsSwitchItem(
+                                        title = stringResource(R.string.settings_root_kill_daemon_title),
+                                        subtitle = stringResource(R.string.settings_root_kill_daemon_desc),
+                                        icon = Icons.Default.Dangerous,
+                                        checked = killDaemonOnStop
+                                    ) {
+                                        killDaemonOnStop = it
+                                        GlobalSettings.setKillRootDaemonOnStop(context, it)
+                                    }
+                                }
+                            }
+
+                            if (rootModeEnabled) {
+                                Spacer(Modifier.height(12.dp))
+                                SettingsCard(title = stringResource(R.string.settings_root_info_title)) {
+                                    val socketPath = "${context.filesDir.absolutePath}/tailscaled.sock"
+                                    val logsDir = File(context.filesDir.parentFile ?: context.filesDir, "logs").absolutePath
+                                    val logPath = "$logsDir/tailscaled.log"
+                                    val serviceScriptPath = RootUtils.SERVICE_SCRIPT_PATH
+                                    var daemonAlive by remember { mutableStateOf(false) }
+
+                                    // Poll real socket liveness every 3s instead of just File.exists()
+                                    LaunchedEffect(Unit) {
+                                        while (true) {
+                                            daemonAlive = withContext(Dispatchers.IO) {
+                                                RootUtils.isDaemonAlive(socketPath)
+                                            }
+                                            kotlinx.coroutines.delay(3_000)
+                                        }
+                                    }
+
+                                    CopyablePathItem(
+                                        label = "Socket Path",
+                                        path = socketPath,
+                                        context = context
+                                    )
+
+                                    Spacer(Modifier.height(8.dp))
+                                    CopyablePathItem(
+                                        label = "Log File",
+                                        path = logPath,
+                                        context = context
+                                    )
+
+                                    Spacer(Modifier.height(8.dp))
+                                    CopyablePathItem(
+                                        label = "Service Script Path",
+                                        path = serviceScriptPath,
+                                        context = context
+                                    )
+
+                                    Spacer(Modifier.height(8.dp))
+                                    Text("Daemon Status:", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                                    Text(
+                                        if (daemonAlive) "Running (socket responding)" else "Not running / socket not responding",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (daemonAlive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        }
+
+
+                        4 -> { // TAB 4: DPI Bypass (ByeByeDPI)
                             var byedpiEnabled by remember { mutableStateOf(GlobalSettings.isCPByeDpiEnabled(context)) }
                             var byedpiFlags by remember { mutableStateOf(GlobalSettings.getCPByeDpiFlags(context)) }
                             var byedpiIpv6Disabled by remember { mutableStateOf(GlobalSettings.isCPByeDpiIpv6Disabled(context)) }
                             val activeBbdAddr = ByeDpiProxy.activeAddress
                             
-                                SettingsCard(title = stringResource(R.string.settings_tab_byedpi)) {
+                            SettingsCard(title = stringResource(R.string.settings_tab_byedpi)) {
                                 Text(
                                     text = stringResource(R.string.settings_byedpi_desc),
                                     style = MaterialTheme.typography.bodySmall,
@@ -946,37 +1368,15 @@ fun SettingsScreen(
                             }
                         }
 
-                        3 -> { // TAB 3: Core Settings
-                            SettingsCard(title = stringResource(R.string.settings_sect_dns_proxy)) {
-                                SettingsEditItem(stringResource(R.string.settings_dns_proxy_address_title), dnsProxy, Icons.Default.Toll) { dnsProxy = it; saveGlobalPref("dns_proxy", it) }
-                            }
-
-                            Spacer(Modifier.height(12.dp))
-
-                             SettingsCard(title = stringResource(R.string.settings_sect_fallback_dns)) {
-                                 SettingsEditItem(stringResource(R.string.settings_dns_fallbacks_title), dnsFallbacks, Icons.AutoMirrored.Filled.List, placeholder = stringResource(R.string.settings_dns_fallbacks_placeholder)) { dnsFallbacks = it; saveGlobalPref("dns_fallbacks", it) }
-                                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-                                SettingsEditItem(stringResource(R.string.settings_doh_fallback_title), dohUrl, Icons.Default.Link, placeholder = stringResource(R.string.settings_doh_fallback_placeholder)) { dohUrl = it; saveGlobalPref("doh_url", it) }
-                            }
-
-                            Spacer(Modifier.height(12.dp))
-
-                            SettingsCard(title = stringResource(R.string.settings_sect_flags_logs)) {
-                                SettingsSwitchItem(stringResource(R.string.settings_accept_routes_title), stringResource(R.string.settings_accept_routes_desc), Icons.Default.Map, acceptRoutes) { acceptRoutes = it; saveGlobalPref("accept_routes", it) }
-                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-                                SettingsSwitchItem(stringResource(R.string.settings_accept_dns_title), stringResource(R.string.settings_accept_dns_desc), Icons.Default.Dns, acceptDns) { acceptDns = it; saveGlobalPref("accept_dns", it) }
-                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-                                SettingsSwitchItem(stringResource(R.string.settings_force_bg_title), stringResource(R.string.settings_force_bg_desc), Icons.Default.BatteryFull, forceBg) { forceBg = it; saveGlobalPref("force_bg", it) }
-                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-                                SettingsSwitchItem(stringResource(R.string.settings_detailed_logs_title), stringResource(R.string.settings_detailed_logs_desc), Icons.Default.BugReport, detailedLogs) { detailedLogs = it; saveGlobalPref("detailed_logs", it) }
-                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
-                                SettingsEditItem(stringResource(R.string.settings_extra_args_title), extraArgs, Icons.Default.Code, stringResource(R.string.settings_extra_args_placeholder)) { extraArgs = it; saveGlobalPref("extra_args_raw", it) }
-                            }
-                        }
-
-                        4 -> { // TAB 4: Account Profile & Advanced
+                        5 -> { // TAB 5: Account Profile & Advanced
                             SettingsCard(title = stringResource(R.string.settings_sect_account_format, activeAccount.name)) {
-                                SettingsEditItem(stringResource(R.string.settings_login_server_title), loginServer, Icons.Default.Cloud, placeholder = stringResource(R.string.settings_login_server_placeholder)) { loginServer = it; saveProfilePref("login_server", it) }
+                                SettingsEditItem(stringResource(R.string.settings_login_server_title), loginServer, Icons.Default.Cloud, placeholder = stringResource(R.string.settings_login_server_placeholder)) { 
+                                    if (loginServer != it) {
+                                        loginServer = it
+                                        saveProfilePref("was_logged_in", false, triggerService = false)
+                                        saveProfilePref("login_server", it)
+                                    }
+                                }
                                 SettingsEditItem(stringResource(R.string.settings_auth_key_title), authKey, Icons.Default.VpnKey) { authKey = it; saveProfilePref("authkey", it) }
                                 SettingsEditItem(stringResource(R.string.settings_hostname_title), hostname, Icons.Default.Badge, onAction = { android.os.Build.MODEL.replace(" ", "-").lowercase() }, actionIcon = Icons.Default.AutoFixHigh) { hostname = it; saveProfilePref("hostname", it) }
                                  @Suppress("UNCHECKED_CAST")
@@ -1094,6 +1494,8 @@ fun SettingsScreen(
                         onValueChange = { tempPassword = it },
                         label = { Text(stringResource(R.string.settings_password_label)) },
                         singleLine = true,
+                        maxLines = 1,
+                        shape = RoundedCornerShape(10.dp),
                         visualTransformation = if (isPasswordVisible) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation(),
                         trailingIcon = {
                             IconButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
@@ -1141,6 +1543,8 @@ fun SettingsScreen(
                         onValueChange = { tempPassword = it },
                         label = { Text(stringResource(R.string.settings_password_label)) },
                         singleLine = true,
+                        maxLines = 1,
+                        shape = RoundedCornerShape(10.dp),
                         visualTransformation = if (isPasswordVisible) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation(),
                         trailingIcon = {
                             IconButton(onClick = { isPasswordVisible = !isPasswordVisible }) {
@@ -1171,6 +1575,7 @@ fun SettingsScreen(
                 }) { Text(stringResource(R.string.action_cancel)) }
             }
         )
+    }
     }
 }
 
@@ -1238,6 +1643,8 @@ fun ControlProxyDialog(onDismiss: () -> Unit, onApply: () -> Unit) {
                         placeholder = { Text("socks5://user:pass@host:port") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
+                        maxLines = 1,
+                        shape = RoundedCornerShape(10.dp),
                         trailingIcon = {
                             IconButton(onClick = {
                                 val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -1326,34 +1733,43 @@ fun ControlProxyDialog(onDismiss: () -> Unit, onApply: () -> Unit) {
 
                     Spacer(Modifier.height(16.dp))
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(stringResource(R.string.settings_control_proxy_type), Modifier.weight(1f))
-                        FilterChip(
-                            selected = type == "SOCKS5",
-                            onClick = { type = "SOCKS5" },
-                            label = { Text(stringResource(R.string.settings_proxy_socks5)) }
-                        )
-                        FilterChip(
-                            selected = type == "HTTP",
-                            onClick = { type = "HTTP" },
-                            label = { Text(stringResource(R.string.settings_proxy_http)) }
-                        )
-                        FilterChip(
-                            selected = type == "HTTPS",
-                            onClick = { type = "HTTPS" },
-                            label = { Text(stringResource(R.string.settings_proxy_type_https)) }
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.settings_control_proxy_type), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(8.dp))
+                        val proxyTypes = listOf("SOCKS5", "HTTP", "HTTPS")
+                        val selectedProxyTypeIdx = proxyTypes.indexOf(type).coerceAtLeast(0)
+                        SlidingSegmentedChips(
+                            options = proxyTypes,
+                            selectedIndex = selectedProxyTypeIdx,
+                            onOptionSelected = { idx -> type = proxyTypes[idx] },
+                            modifier = Modifier.fillMaxWidth(),
+                            height = 36.dp
                         )
                     }
                     Spacer(Modifier.height(16.dp))
                     
-                    OutlinedTextField(value = host, onValueChange = { host = it }, label = { Text(stringResource(R.string.settings_control_proxy_host)) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                    OutlinedTextField(value = port, onValueChange = { port = it }, label = { Text(stringResource(R.string.settings_control_proxy_port)) }, modifier = Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text(if (type == "SOCKS5") "1080" else "8080") })
-                    OutlinedTextField(value = user, onValueChange = { user = it }, label = { Text(stringResource(R.string.settings_control_proxy_username)) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                    OutlinedTextField(value = pass, onValueChange = { pass = it }, label = { Text(stringResource(R.string.settings_control_proxy_password)) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(value = host, onValueChange = { host = it }, label = { Text(stringResource(R.string.settings_control_proxy_host)) }, modifier = Modifier.fillMaxWidth(), singleLine = true, maxLines = 1, shape = RoundedCornerShape(10.dp))
+                    OutlinedTextField(
+                        value = port,
+                        onValueChange = { newValue ->
+                            val digits = newValue.filter { it.isDigit() }
+                            if (digits.length <= 5) {
+                                val num = digits.toIntOrNull()
+                                if (num == null || num <= 65535) {
+                                    port = digits
+                                }
+                            }
+                        },
+                        label = { Text(stringResource(R.string.settings_control_proxy_port)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        maxLines = 1,
+                        shape = RoundedCornerShape(10.dp),
+                        placeholder = { Text(if (type == "SOCKS5") "1080" else "8080") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                    OutlinedTextField(value = user, onValueChange = { user = it }, label = { Text(stringResource(R.string.settings_control_proxy_username)) }, modifier = Modifier.fillMaxWidth(), singleLine = true, maxLines = 1, shape = RoundedCornerShape(10.dp))
+                    OutlinedTextField(value = pass, onValueChange = { pass = it }, label = { Text(stringResource(R.string.settings_control_proxy_password)) }, modifier = Modifier.fillMaxWidth(), singleLine = true, maxLines = 1, shape = RoundedCornerShape(10.dp))
                     
                     Spacer(Modifier.height(12.dp))
                     
@@ -1399,6 +1815,8 @@ fun ControlProxyDialog(onDismiss: () -> Unit, onApply: () -> Unit) {
                     onValueChange = { presetName = it },
                     label = { Text(stringResource(R.string.settings_proxy_preset_name_label)) },
                     singleLine = true,
+                    maxLines = 1,
+                    shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth()
                 )
             },
@@ -1433,36 +1851,49 @@ fun ControlProxyDialog(onDismiss: () -> Unit, onApply: () -> Unit) {
 }
 
 @Composable
-fun SettingsClickableItem(title: String, subtitle: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
+fun SettingsClickableItem(
+    title: String, 
+    subtitle: String, 
+    icon: androidx.compose.ui.graphics.vector.ImageVector, 
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
     Surface(
-        onClick = onClick, 
+        onClick = { if (enabled) onClick() }, 
         shape = RoundedCornerShape(12.dp), 
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (enabled) 0.3f else 0.1f),
         modifier = Modifier.padding(vertical = 4.dp)
     ) {
         ListItem(
-            headlineContent = { Text(title) },
-            supportingContent = { Text(subtitle, style = MaterialTheme.typography.bodySmall) },
-            leadingContent = { Icon(icon, null, tint = MaterialTheme.colorScheme.primary) },
-            trailingContent = { Icon(Icons.Default.ChevronRight, null) },
+            headlineContent = { Text(title, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline) },
+            supportingContent = { Text(subtitle, style = MaterialTheme.typography.bodySmall, color = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.outline) },
+            leadingContent = { Icon(icon, null, tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline) },
+            trailingContent = { Icon(Icons.Default.ChevronRight, null, tint = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.outline) },
             colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
         )
     }
 }
 
 @Composable
-fun SettingsSwitchItem(title: String, subtitle: String, icon: androidx.compose.ui.graphics.vector.ImageVector, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+fun SettingsSwitchItem(
+    title: String, 
+    subtitle: String, 
+    icon: androidx.compose.ui.graphics.vector.ImageVector, 
+    checked: Boolean, 
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit
+) {
     Surface(
-        onClick = { onCheckedChange(!checked) }, 
+        onClick = { if (enabled) onCheckedChange(!checked) }, 
         shape = RoundedCornerShape(12.dp), 
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (enabled) 0.3f else 0.1f),
         modifier = Modifier.padding(vertical = 4.dp)
     ) {
         ListItem(
-            headlineContent = { Text(title) },
-            supportingContent = { Text(subtitle, style = MaterialTheme.typography.bodySmall) },
-            leadingContent = { Icon(icon, null, tint = MaterialTheme.colorScheme.primary) },
-            trailingContent = { Switch(checked = checked, onCheckedChange = onCheckedChange) },
+            headlineContent = { Text(title, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline) },
+            supportingContent = { Text(subtitle, style = MaterialTheme.typography.bodySmall, color = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.outline) },
+            leadingContent = { Icon(icon, null, tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline) },
+            trailingContent = { Switch(checked = checked, onCheckedChange = if (enabled) onCheckedChange else null, enabled = enabled) },
             colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
         )
     }
@@ -1475,6 +1906,7 @@ fun SettingsEditItem(
     icon: androidx.compose.ui.graphics.vector.ImageVector, 
     placeholder: String = "", 
     description: String = "",
+    enabled: Boolean = true,
     suggestions: List<String> = emptyList(),
     onAction: (() -> String)? = null,
     actionIcon: androidx.compose.ui.graphics.vector.ImageVector? = null,
@@ -1484,23 +1916,25 @@ fun SettingsEditItem(
     var text by remember { mutableStateOf(value) }
     LaunchedEffect(showDialog) { if (showDialog) text = value }
     Surface(
-        onClick = { showDialog = true }, 
+        onClick = { if (enabled) showDialog = true }, 
         shape = RoundedCornerShape(12.dp), 
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (enabled) 0.3f else 0.15f),
         modifier = Modifier.padding(vertical = 4.dp)
     ) {
         ListItem(
-            headlineContent = { Text(title) },
+            headlineContent = { Text(title, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)) },
             supportingContent = { 
                 Text(
-                    text = if (value.isEmpty()) {
+                    text = if (!enabled && description.isNotEmpty()) description else if (value.isEmpty()) {
                         if (description.isNotEmpty()) description else (placeholder.ifEmpty { "Not set" })
                     } else value, 
                     maxLines = 1, 
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    color = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                 ) 
             },
-            leadingContent = { Icon(icon, null, tint = MaterialTheme.colorScheme.primary) },
+            leadingContent = { Icon(icon, null, tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)) },
+            trailingContent = if (!enabled) { { Icon(Icons.Default.Lock, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), modifier = Modifier.size(18.dp)) } } else null,
             colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
         )
     }
@@ -1515,6 +1949,8 @@ fun SettingsEditItem(
                         onValueChange = { text = it }, 
                         modifier = Modifier.fillMaxWidth(), 
                         singleLine = true,
+                        maxLines = 1,
+                        shape = RoundedCornerShape(10.dp),
                         label = { if (placeholder.isNotEmpty()) Text(stringResource(R.string.settings_field_example, placeholder)) },
                         placeholder = { if (placeholder.isNotEmpty()) Text(placeholder) },
                         trailingIcon = if (onAction != null && actionIcon != null) {
@@ -1855,3 +2291,37 @@ fun SettingsExitNodeItem(
         }
     }
 }
+
+@Composable
+private fun CopyablePathItem(
+    label: String,
+    path: String,
+    context: Context
+) {
+    val clipboard = remember(context) { context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                clipboard.setPrimaryClip(ClipData.newPlainText(label, path))
+                Toast.makeText(context, "$label copied to clipboard", Toast.LENGTH_SHORT).show()
+            }
+            .padding(vertical = 2.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            Icon(
+                Icons.Default.ContentCopy,
+                contentDescription = "Copy $label",
+                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                modifier = Modifier.size(14.dp)
+            )
+        }
+        Text(path, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+

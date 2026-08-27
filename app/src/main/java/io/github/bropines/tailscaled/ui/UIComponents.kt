@@ -56,7 +56,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
-// --- ПИРЫ ---
+// --- PEERS ---
 
 fun getOsVisuals(os: String?): Pair<ImageVector, Color> {
     val osLower = os?.lowercase().orEmpty()
@@ -208,10 +208,26 @@ fun PeerDetailsModal(
     val pingText = when {
         pingResult == null -> stringResource(R.string.peer_ping)
         pingResult == "Pinging..." -> stringResource(R.string.peer_pinging)
-        pingResult!!.contains("pong from") -> {
-            val time = """\b\d+(?:\.\d+)?\s*ms\b""".toRegex().find(pingResult!!)?.value ?: ""
-            val displayValue = time.ifEmpty { pingResult!!.replace("pong from", "").trim() }
-            stringResource(R.string.peer_ping_result, displayValue)
+        pingResult!!.isNotBlank() && !pingResult!!.contains("Failed") && !pingResult!!.startsWith("Error") -> {
+            val parsedTime = try {
+                val jsonObj = com.google.gson.JsonParser.parseString(pingResult!!).asJsonObject
+                val err = jsonObj.get("Err")?.asString
+                if (!err.isNullOrEmpty()) {
+                    null
+                } else {
+                    val sec = jsonObj.get("LatencySeconds")?.asDouble
+                    if (sec != null && sec > 0) {
+                        "${(sec * 1000).toInt()} ms"
+                    } else {
+                        val ms = jsonObj.get("LatencyMs")?.asDouble
+                        if (ms != null && ms > 0) "${ms.toInt()} ms" else null
+                    }
+                }
+            } catch (e: Exception) {
+                """\b\d+(?:\.\d+)?\s*ms\b""".toRegex().find(pingResult!!)?.value
+            }
+            if (parsedTime != null) stringResource(R.string.peer_ping_result, parsedTime)
+            else stringResource(R.string.peer_ping_failed)
         }
         else -> stringResource(R.string.peer_ping_failed)
     }
@@ -290,8 +306,13 @@ fun PeerDetailsModal(
                     onClick = {
                         pingResult = "Pinging..."
                         scope.launch(Dispatchers.IO) {
-                            val out = try { Appctr.runTailscaleCmd("ping ${peer.getPrimaryIp()}") } catch (e: Exception) { "Error" }
-                            val pong = out.split("\n").find { it.contains("pong from") } ?: "Failed"
+                            val targetIp = peer.getPrimaryIp()
+                            val out = try {
+                                val res = Appctr.pingTarget(targetIp, "disco")
+                                if (res.isNotBlank() && !res.startsWith("Error")) res
+                                else Appctr.runTailscaleCmd("ping $targetIp")
+                            } catch (e: Exception) { "Error" }
+                            val pong = out.split("\n").find { it.contains("pong from") || it.contains("LatencyMs") } ?: out.ifBlank { "Failed" }
                             withContext(Dispatchers.Main) { pingResult = pong.trim() }
                         }
                     },
@@ -381,7 +402,7 @@ fun PeerDetailsModal(
     }
 }
 
-// --- ФАЙЛЫ ---
+// --- FILES ---
 
 @Composable
 fun FileCard(file: TaildropFile, onOpen: () -> Unit, onSave: () -> Unit, onDelete: () -> Unit) {

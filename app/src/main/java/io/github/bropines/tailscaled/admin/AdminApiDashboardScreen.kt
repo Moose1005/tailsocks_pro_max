@@ -82,12 +82,13 @@ fun AdminApiDashboardScreen(
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     var showKeysManagement by remember { mutableStateOf(false) }
 
-    // Fetch SOCKS5 settings from global configurations
+    // Fetch SOCKS5 and Control Plane Proxy settings from global configurations
     val localSocksAddr = remember { GlobalSettings.getString(context, "socks5", "127.0.0.1:48115") }
     val localSocksUser = remember { GlobalSettings.getString(context, "socks5_user", "") }
     val localSocksPass = remember { GlobalSettings.getString(context, "socks5_pass", "") }
+    val controlProxyUrl = remember { GlobalSettings.getControlProxyUrl(context) }
 
-    val client = remember(token, tailnet, proxyMode, proxyHost, proxyPort, proxyUser, proxyPass, localSocksAddr, localSocksUser, localSocksPass, clientId, clientSecret) {
+    val client = remember(token, tailnet, proxyMode, proxyHost, proxyPort, proxyUser, proxyPass, localSocksAddr, localSocksUser, localSocksPass, clientId, clientSecret, controlProxyUrl) {
         TailscaleApiClient(
             token = token,
             tailnetName = tailnet,
@@ -100,7 +101,8 @@ fun AdminApiDashboardScreen(
             localSocksUser = localSocksUser,
             localSocksPass = localSocksPass,
             clientId = clientId,
-            clientSecret = clientSecret
+            clientSecret = clientSecret,
+            controlProxyUrl = controlProxyUrl
         )
     }
 
@@ -303,36 +305,19 @@ fun AdminApiDashboardScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            val listState = rememberLazyListState()
-            LaunchedEffect(pagerState.currentPage) {
-                listState.animateScrollToItem(pagerState.currentPage)
-            }
-
-            LazyRow(
-                state = listState,
+            ScrollableSlidingSegmentedChips(
+                options = tabs,
+                selectedIndex = pagerState.currentPage,
+                onOptionSelected = { index ->
+                    scope.launch {
+                        pagerState.animateScrollToPage(index)
+                    }
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                items(tabs.size) { index ->
-                    val title = tabs[index]
-                    FilterChip(
-                        selected = pagerState.currentPage == index,
-                        onClick = {
-                            scope.launch {
-                                pagerState.animateScrollToPage(index)
-                            }
-                        },
-                        label = { Text(title) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    )
-                }
-            }
+                height = 40.dp
+            )
 
             HorizontalPager(
                 state = pagerState,

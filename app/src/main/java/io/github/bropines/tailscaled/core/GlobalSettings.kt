@@ -55,6 +55,20 @@ object GlobalSettings {
     fun setCPByeDpiIpv6Disabled(context: Context, disabled: Boolean) = getPrefs(context).edit().putBoolean("cp_byedpi_ipv6_disabled", disabled).apply()
 
     fun getControlProxyUrl(context: Context): String {
+        if (isCPByeDpiEnabled(context)) {
+            var addr = ByeDpiProxy.activeAddress
+            if (addr == null) {
+                try {
+                    val flags = getCPByeDpiFlags(context)
+                    addr = ByeDpiProxy.start(flags, context)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            if (addr != null) {
+                return "socks5://${addr.first}:${addr.second}"
+            }
+        }
         if (!isCPProxyEnabled(context)) return ""
         val type = getPrefs(context).getString("cp_type", "SOCKS5") ?: "SOCKS5"
         val host = getPrefs(context).getString("cp_host", "") ?: ""
@@ -211,5 +225,23 @@ object GlobalSettings {
         val json = com.google.gson.Gson().toJson(presets)
         getPrefs(context).edit().putString("cp_presets", json).apply()
     }
+
+    // Tasker & Automation Settings
+    fun isAutomationEnabled(context: Context): Boolean = getPrefs(context).getBoolean("automation_enabled", true)
+    fun setAutomationEnabled(context: Context, enabled: Boolean) = getPrefs(context).edit().putBoolean("automation_enabled", enabled).apply()
+
+    fun getAutomationSecret(context: Context): String = getPrefs(context).getString("automation_secret", "") ?: ""
+    fun setAutomationSecret(context: Context, secret: String) = getPrefs(context).edit().putString("automation_secret", secret.trim()).apply()
+
+    // Root Mode Settings
+    fun isRootModeEnabled(context: Context): Boolean = getPrefs(context).getBoolean("root_mode_enabled", false)
+    fun setRootModeEnabled(context: Context, enabled: Boolean) = getPrefs(context).edit().putBoolean("root_mode_enabled", enabled).apply()
+
+    fun isRootTunEnabled(context: Context): Boolean = getPrefs(context).getBoolean("root_tun_enabled", true)
+    fun setRootTunEnabled(context: Context, enabled: Boolean) = getPrefs(context).edit().putBoolean("root_tun_enabled", enabled).apply()
+
+    fun shouldKillRootDaemonOnStop(context: Context): Boolean = getPrefs(context).getBoolean("root_kill_daemon_on_stop", true)
+    fun setKillRootDaemonOnStop(context: Context, kill: Boolean) = getPrefs(context).edit().putBoolean("root_kill_daemon_on_stop", kill).apply()
 }
+
 

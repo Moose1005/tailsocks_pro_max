@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
@@ -28,6 +29,8 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.res.stringResource
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -86,13 +89,12 @@ fun ServeScreen(onBack: () -> Unit) {
     var config by remember { mutableStateOf<ServeConfig?>(null) }
     var selfDns by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(true) }
-    val pagerState = rememberPagerState(pageCount = { 3 })
+    val pagerState = rememberPagerState(pageCount = { 2 })
     var showEditDialog by remember { mutableStateOf<ServeRuleEditData?>(null) }
     var showClearDialog by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val clipboard = LocalClipboardManager.current
     var healthMap by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
-    var serveLogs by remember { mutableStateOf<List<LogEntry>>(emptyList()) }
 
     var pendingCertData by remember { mutableStateOf("") }
     var showCertExportDialog by remember { mutableStateOf(false) }
@@ -100,7 +102,10 @@ fun ServeScreen(onBack: () -> Unit) {
         if (uri != null && pendingCertData.isNotEmpty()) {
             scope.launch(Dispatchers.IO) {
                 try {
-                    context.contentResolver.openOutputStream(uri)?.use { it.write(pendingCertData.toByteArray()) }
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(pendingCertData.toByteArray())
+                        out.flush()
+                    }
                     withContext(Dispatchers.Main) {
                         Toast.makeText(context, context.getString(R.string.serve_cert_saved), Toast.LENGTH_SHORT).show()
                     }
@@ -109,33 +114,6 @@ fun ServeScreen(onBack: () -> Unit) {
                         Toast.makeText(context, context.getString(R.string.serve_save_failed_format, e.message), Toast.LENGTH_LONG).show()
                     }
                 }
-            }
-        }
-    }
-
-    fun loadServeLogs() {
-        scope.launch(Dispatchers.IO) {
-            val jsonString = try { Appctr.getLogsJSON() } catch (e: Exception) { "[]" }
-            val logsList: List<LogEntry> = try {
-                Gson().fromJson(jsonString, object : com.google.gson.reflect.TypeToken<List<LogEntry>>() {}.type)
-            } catch (e: Exception) { emptyList() }
-            
-            val filtered = logsList.filter { log ->
-                val msg = log.message.lowercase()
-                msg.contains("serve") || msg.contains("funnel") || msg.contains("ingress") || msg.contains("accept: tcp") || msg.contains("tls")
-            }
-            
-            withContext(Dispatchers.Main) {
-                serveLogs = filtered
-            }
-        }
-    }
-
-    LaunchedEffect(pagerState.currentPage) {
-        if (pagerState.currentPage == 2) {
-            while (true) {
-                loadServeLogs()
-                delay(3000)
             }
         }
     }
@@ -188,11 +166,15 @@ fun ServeScreen(onBack: () -> Unit) {
         }
     }
 
+    LaunchedEffect(Unit) {
+        refresh()
+    }
+
     fun saveConfig(newConfig: ServeConfig) {
         isLoading = true
         config = newConfig
         scope.launch(Dispatchers.IO) {
-            // Если всё пусто - принудительно шлем пустой конфиг для очистки AllowFunnel и т.д.
+            // If completely empty, force sending empty config object to reset AllowFunnel etc.
             val jsonPayload = if (newConfig.tcp == null && newConfig.web == null && newConfig.services == null && newConfig.allowFunnel == null) {
                 if (newConfig.etag != null) "{\"etag\": \"${newConfig.etag}\", \"TCP\": {}, \"Web\": {}, \"AllowFunnel\": {}}" else "{\"TCP\": {}, \"Web\": {}, \"AllowFunnel\": {}}"
             } else {
@@ -217,66 +199,53 @@ fun ServeScreen(onBack: () -> Unit) {
             val parts = selfDns.split(".", limit = 2)
             if (parts.size < 2) "$serviceName.$selfDns" else "$serviceName.${parts[1]}"
         } else selfDns
-        // Для стандартных портов 80/443 не показываем порт в ссылке
+        // For standard 80/443 ports, omit port suffix in URL
         val portSuffix = if ((realProto == "http" && port == 80) || (realProto == "https" && port == 443)) "" else ":$port"
         return "$realProto://$baseDns$portSuffix"
     }
 
-    LaunchedEffect(Unit) { refresh() }
-
-    Scaffold(
-        topBar = {
-            Column {
-                TopAppBar(
-                    title = { Text(stringResource(R.string.serve_title)) },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back)) }
-                    },
-                    actions = {
-                        if (selfDns.isNotEmpty()) {
-                            IconButton(onClick = { showCertExportDialog = true }) { 
-                                Icon(Icons.Default.Security, stringResource(R.string.serve_cd_export_cert)) 
-                            }
-                        }
-                        IconButton(onClick = { showClearDialog = true }) { Icon(Icons.Default.DeleteSweep, stringResource(R.string.serve_cd_clear_all)) }
-                        IconButton(onClick = { refresh() }) { Icon(Icons.Default.Refresh, stringResource(R.string.action_refresh)) }
-                    }
-                )
-                val serveTabs = listOf(
-                    stringResource(R.string.serve_tab_serve),
-                    stringResource(R.string.serve_tab_funnel),
-                    stringResource(R.string.serve_tab_logs)
-                )
-                val listState = rememberLazyListState()
-                LaunchedEffect(pagerState.currentPage) {
-                    listState.animateScrollToItem(pagerState.currentPage)
-                }
-                LazyRow(
-                    state = listState,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    items(serveTabs.size) { index ->
-                        FilterChip(
-                            selected = pagerState.currentPage == index,
-                            onClick = {
-                                scope.launch {
-                                    pagerState.animateScrollToPage(index)
+    PredictiveBackContainer(
+        onBack = onBack,
+        targetTitle = stringResource(R.string.predictive_back_target_dashboard),
+        targetIcon = Icons.Default.Home
+    ) {
+        Scaffold(
+            topBar = {
+                Column {
+                    TopAppBar(
+                        title = { Text(stringResource(R.string.serve_title)) },
+                        navigationIcon = {
+                            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back)) }
+                        },
+                        actions = {
+                            if (selfDns.isNotEmpty()) {
+                                IconButton(onClick = { showCertExportDialog = true }) { 
+                                    Icon(Icons.Default.Security, stringResource(R.string.serve_cd_export_cert)) 
                                 }
-                            },
-                            label = { Text(serveTabs[index]) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        )
-                    }
+                            }
+                            IconButton(onClick = { showClearDialog = true }) { Icon(Icons.Default.DeleteSweep, stringResource(R.string.serve_cd_clear_all)) }
+                            IconButton(onClick = { refresh() }) { Icon(Icons.Default.Refresh, stringResource(R.string.action_refresh)) }
+                        }
+                    )
+                    val serveTabs = listOf(
+                        stringResource(R.string.serve_tab_serve),
+                        stringResource(R.string.serve_tab_funnel)
+                    )
+                    val pageOffset = (pagerState.currentPage + pagerState.currentPageOffsetFraction).coerceIn(0f, (serveTabs.size - 1).toFloat())
+                    SlidingSegmentedChips(
+                        options = serveTabs,
+                        selectedIndex = pagerState.currentPage,
+                        onOptionSelected = { index ->
+                            scope.launch { pagerState.animateScrollToPage(index) }
+                        },
+                        positionOffset = pageOffset,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        height = 40.dp
+                    )
                 }
-            }
-        },
+            },
         floatingActionButton = {
             FloatingActionButton(onClick = { 
                 showEditDialog = ServeRuleEditData(
@@ -294,40 +263,7 @@ fun ServeScreen(onBack: () -> Unit) {
             modifier = Modifier.padding(padding).fillMaxSize()
         ) {
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
-                if (page == 2) {
-                    val listState = rememberLazyListState()
-                    LaunchedEffect(serveLogs.size) {
-                        if (serveLogs.isNotEmpty()) {
-                            listState.animateScrollToItem(serveLogs.size - 1)
-                        }
-                    }
-                    if (serveLogs.isEmpty()) {
-                        Column(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                            Icon(Icons.AutoMirrored.Filled.List, null, modifier = Modifier.size(64.dp), tint = Color.Gray)
-                            Spacer(Modifier.height(16.dp))
-                            Text(stringResource(R.string.serve_no_logs), style = MaterialTheme.typography.bodyLarge, color = Color.Gray)
-                        }
-                    } else {
-                        LazyColumn(
-                            state = listState,
-                            modifier = Modifier.fillMaxSize().padding(16.dp)
-                        ) {
-                            items(serveLogs) { log ->
-                                val defaultColor = MaterialTheme.colorScheme.onSurface
-                                val highlightedText = remember(log, defaultColor) {
-                                    highlightLogMessage(log.timestamp, log.category, log.message, defaultColor)
-                                }
-                                Text(
-                                    text = highlightedText,
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    modifier = Modifier.padding(vertical = 2.dp)
-                                )
-                            }
-                        }
-                    }
-                } else {
-                    val isFunnelTab = page == 1
+                val isFunnelTab = page == 1
                     val serveItems = mutableListOf<@Composable () -> Unit>()
                     val funnelItems = mutableListOf<@Composable () -> Unit>()
 
@@ -800,71 +736,78 @@ fun AddServeRuleDialog(data: ServeRuleEditData, onDismiss: () -> Unit, onConfirm
                         placeholder = { Text(stringResource(R.string.serve_field_service_placeholder)) },
                         supportingText = { Text(stringResource(R.string.serve_field_service_hint)) },
                         enabled = !data.isEditing,
+                        singleLine = true,
+                        maxLines = 1,
+                        shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
                 
                 Column {
                     Text(stringResource(R.string.serve_field_mode), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("Web", "TCP").forEach { m ->
-                            FilterChip(
-                                selected = mode == m,
-                                onClick = { 
-                                    mode = m
-                                    if (m == "Web" && port == "10000") port = "443"
-                                    if (m == "TCP" && (port == "443" || port == "80")) port = "10000"
-                                },
-                                label = { Text(m) }
-                            )
-                        }
-                    }
+                    Spacer(Modifier.height(6.dp))
+                    val modes = listOf("Web", "TCP")
+                    val selectedModeIdx = modes.indexOf(mode).coerceAtLeast(0)
+                    SlidingSegmentedChips(
+                        options = modes,
+                        selectedIndex = selectedModeIdx,
+                        onOptionSelected = { idx ->
+                            val m = modes[idx]
+                            mode = m
+                            if (m == "Web" && port == "10000") port = "443"
+                            if (m == "TCP" && (port == "443" || port == "80")) port = "10000"
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        height = 36.dp
+                    )
                 }
 
                 if (mode == "Web") {
                     Column {
                         Text(stringResource(R.string.serve_field_transport), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            // Funnel forces HTTPS
-                            val transports = if (data.isFunnel) listOf("HTTPS") else listOf("HTTPS", "HTTP")
-                            transports.forEach { t ->
-                                FilterChip(
-                                    selected = transport == t,
-                                    onClick = { 
-                                        transport = t 
-                                        if (t == "HTTPS" && port == "80") port = "443"
-                                        if (t == "HTTP" && port == "443") port = "80"
-                                    },
-                                    label = { Text(t) }
-                                )
-                            }
-                        }
+                        Spacer(Modifier.height(6.dp))
+                        val transports = if (data.isFunnel) listOf("HTTPS") else listOf("HTTPS", "HTTP")
+                        val selectedTransportIdx = transports.indexOf(transport).coerceAtLeast(0)
+                        SlidingSegmentedChips(
+                            options = transports,
+                            selectedIndex = selectedTransportIdx,
+                            onOptionSelected = { idx ->
+                                val t = transports[idx]
+                                transport = t
+                                if (t == "HTTPS" && port == "80") port = "443"
+                                if (t == "HTTP" && port == "443") port = "80"
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            height = 36.dp
+                        )
                     }
 
                     Column {
                         Text(stringResource(R.string.serve_field_handler), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
-                            listOf("Proxy", "Text", "Redirect").forEach { h ->
-                                FilterChip(
-                                    selected = handlerType == h,
-                                    onClick = { handlerType = h },
-                                    label = { Text(h) }
-                                )
-                            }
-                        }
+                        Spacer(Modifier.height(6.dp))
+                        val handlers = listOf("Proxy", "Text", "Redirect")
+                        val selectedHandlerIdx = handlers.indexOf(handlerType).coerceAtLeast(0)
+                        SlidingSegmentedChips(
+                            options = handlers,
+                            selectedIndex = selectedHandlerIdx,
+                            onOptionSelected = { idx -> handlerType = handlers[idx] },
+                            modifier = Modifier.fillMaxWidth(),
+                            height = 36.dp
+                        )
                     }
                 } else {
                     Column {
                         Text(stringResource(R.string.serve_field_proxy_proto), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(0 to "None", 1 to "v1", 2 to "v2").forEach { (v, label) ->
-                                FilterChip(
-                                    selected = proxyProtocol == v,
-                                    onClick = { proxyProtocol = v },
-                                    label = { Text(label) }
-                                )
-                            }
-                        }
+                        Spacer(Modifier.height(6.dp))
+                        val proxyProtos = listOf(0 to "None", 1 to "v1", 2 to "v2")
+                        val selectedProtoIdx = proxyProtos.indexOfFirst { it.first == proxyProtocol }.coerceAtLeast(0)
+                        SlidingSegmentedChips(
+                            options = proxyProtos.map { it.second },
+                            selectedIndex = selectedProtoIdx,
+                            onOptionSelected = { idx -> proxyProtocol = proxyProtos[idx].first },
+                            modifier = Modifier.fillMaxWidth(),
+                            height = 36.dp
+                        )
                     }
                 }
 
@@ -877,10 +820,22 @@ fun AddServeRuleDialog(data: ServeRuleEditData, onDismiss: () -> Unit, onConfirm
                 val portSupportingText = if (data.isFunnel) stringResource(R.string.serve_field_port_hint_funnel) else stringResource(R.string.serve_field_port_hint_serve)
                 OutlinedTextField(
                     value = port, 
-                    onValueChange = { port = it }, 
+                    onValueChange = { newValue ->
+                        val digits = newValue.filter { it.isDigit() }
+                        if (digits.length <= 5) {
+                            val num = digits.toIntOrNull()
+                            if (num == null || num <= 65535) {
+                                port = digits
+                            }
+                        }
+                    }, 
                     label = { Text(portLabel) },
                     supportingText = { Text(portSupportingText) },
                     enabled = !data.isEditing,
+                    singleLine = true,
+                    maxLines = 1,
+                    shape = RoundedCornerShape(10.dp),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth()
                 )
                 
@@ -891,10 +846,27 @@ fun AddServeRuleDialog(data: ServeRuleEditData, onDismiss: () -> Unit, onConfirm
                     handlerType == "Redirect" -> stringResource(R.string.serve_field_target_redirect)
                     else -> stringResource(R.string.serve_field_target)
                 }
+                val isTargetPortOnly = (mode == "TCP")
                 OutlinedTextField(
                     value = target, 
-                    onValueChange = { target = it }, 
+                    onValueChange = { newValue ->
+                        if (isTargetPortOnly) {
+                            val digits = newValue.filter { it.isDigit() }
+                            if (digits.length <= 5) {
+                                val num = digits.toIntOrNull()
+                                if (num == null || num <= 65535) {
+                                    target = digits
+                                }
+                            }
+                        } else {
+                            target = newValue
+                        }
+                    }, 
                     label = { Text(targetLabel) },
+                    singleLine = true,
+                    maxLines = 1,
+                    shape = RoundedCornerShape(10.dp),
+                    keyboardOptions = if (isTargetPortOnly) KeyboardOptions(keyboardType = KeyboardType.Number) else KeyboardOptions.Default,
                     modifier = Modifier.fillMaxWidth()
                 )
             }

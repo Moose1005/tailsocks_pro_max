@@ -14,9 +14,53 @@ reach your Tailnet over an encrypted WireGuard tunnel — simultaneously, withou
 
 ---
 
+## Building this fork from source
+
+This repository is **Moose1005/tailsocks_pro_max**, a fork of
+[bropines/tailsocks](https://github.com/bropines/tailsocks) carrying the InviZible Pro Max bridge.
+
+**Clone with submodules — this is not optional:**
+
+```
+git clone --recurse-submodules https://github.com/Moose1005/tailsocks_pro_max.git
+```
+
+If you already cloned without them:
+
+```
+git submodule update --init --recursive
+```
+
+Skipping this produces an APK that builds and installs cleanly but has **no TUN mode at all**.
+`app/build.gradle.kts` only wires up `ndkBuild` when the prebuilt library is missing, and
+`ndkBuild` needs the `app/src/main/jni/hev-socks5-tunnel` sources. With an empty submodule
+directory it compiles nothing and reports no error, and at runtime `TunVpnService.nativeLoaded`
+is false, so both `startTunMode()` and `stopTunMode()` return immediately.
+
+The symptom is misleading: the UI can still display **"Active + TUN"**, because that label
+reflects the *setting* rather than an established tunnel. Verify with:
+
+```
+unzip -l app/build/outputs/apk/debug/app-x86_64-debug.apk | grep hev-socks5-tunnel
+```
+
+Nothing listed means TUN is not present in that build.
+
+The Go core (`appctr.aar`) is built separately by the scripts in `appctr/`. On Windows use
+`build_x86_64_win.sh` or `build_all_win.sh` - upstream's `build.sh` has Linux-only NDK paths.
+**Check the result is a valid archive before building the app**, since `gomobile bind` has been
+observed exiting successfully while leaving a truncated file, which Gradle only reports much later
+as an unrelated-looking `invalid block type`:
+
+```
+unzip -t appctr/tmp/appctr.aar
+```
+
+---
+
 ## Prerequisites
 
-- **InviZible Pro** — use the [GitHub/F-Droid build](https://github.com/Moose1005/InviZible), not
+- **InviZible Pro** — use the [GitHub/F-Droid build](https://github.com/Moose1005/InviZible-Pro-Max), not
   Play Store (the Play version drops some DNSCrypt options).
 - **TailSocks** — download the latest APK from
   [GitHub Releases](https://github.com/bropines/tailsocks/releases/latest). Android will warn

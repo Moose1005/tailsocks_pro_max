@@ -121,9 +121,24 @@ func logWithFilter(text string) {
 	slog.Info(text)
 }
 
+var externalSocketPath string
+
+func SetExternalSocketPath(path string) {
+	stateMu.Lock()
+	externalSocketPath = path
+	PC.SetSocket(path)
+	slog.Info("External daemon socket path set", "path", path)
+	stateMu.Unlock()
+	EnsureIPNBusListener()
+}
+
 func IsRunning() bool {
 	stateMu.Lock()
 	defer stateMu.Unlock()
+	if externalSocketPath != "" {
+		_, err := os.Stat(externalSocketPath)
+		return err == nil
+	}
 	return cmd != nil && cmd.Process != nil
 }
 
@@ -196,14 +211,6 @@ func NativeDnsQuery(domain, qtype string) string {
 }
 
 func FlushDNS() {
-	dnsCache.Range(func(key, value interface{}) bool {
-		dnsCache.Delete(key)
-		return true
-	})
-	slog.Info("DNS cache flushed")
-}
-
-func ResetDNSMetadata() {
 	splitDNSCache.Range(func(key, value interface{}) bool {
 		splitDNSCache.Delete(key)
 		return true
@@ -213,7 +220,11 @@ func ResetDNSMetadata() {
 		return true
 	})
 	magicDNSSuffix = ""
-	slog.Info("DNS split routes and nodes metadata reset")
+	slog.Info("DNS caches and metadata reset")
+}
+
+func ResetDNSMetadata() {
+	FlushDNS()
 }
 
 func syncSettings(opt *StartOptions) {
@@ -230,6 +241,22 @@ func syncSettings(opt *StartOptions) {
 		}
 
 		time.Sleep(500 * time.Millisecond)
+
+		// Check backend status; skip PATCH /prefs if in NeedsLogin state to avoid resetting controlclient / interrupting interactive login
+		statusDataStr, err := GetStatusJSON(false)
+		if err == nil && len(statusDataStr) > 0 {
+			var st struct {
+				BackendState string `json:"BackendState"`
+				AuthURL      string `json:"AuthURL"`
+			}
+			if json.Unmarshal([]byte(statusDataStr), &st) == nil {
+				if st.BackendState == "NeedsLogin" || st.AuthURL != "" {
+					slog.Info("syncSettings: backend is in NeedsLogin state, skipping PATCH /prefs to preserve login flow")
+					return
+				}
+			}
+		}
+
 		prefs := make(map[string]interface{})
 		if opt.Hostname != "" {
 			prefs["Hostname"] = opt.Hostname
@@ -388,6 +415,10 @@ func Start(opt *StartOptions) {
 	lastOptions = opt
 	daemonStartTime = time.Now()
 	stateMu.Unlock()
+
+	slog.Info("========================================")
+	slog.Info("=== TAILSOCKS GO CORE STARTING ===", "version", coreVersion, "do_reset", opt.DoReset, "has_authkey", opt.AuthKey != "")
+	slog.Info("========================================")
 	GConfig.update(opt.Socks5Server, opt.Socks5User, opt.Socks5Pass, opt.DnsProxy)
 
 	killLeftoverDaemons(PC.Tailscaled())
@@ -419,6 +450,50 @@ func Start(opt *StartOptions) {
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
+		EnsureIPNBusListener()
+		if opt.AuthKey != "" {
+			Login(opt.AuthKey)
+		} else {
+			registerMachineWithAuthKey(PC, opt)
+		}
+		syncSettings(opt)
+	}()
+
+	if opt.DnsProxy != "" {
+		RestartDNS()
+	}
+
+	if opt.TaildropDir != "" {
+		stateMu.Lock()
+		ctx, cancel := context.WithCancel(context.Background())
+		taildropCancel = cancel
+		stateMu.Unlock()
+		go startTaildropCollector(ctx, opt.TaildropDir)
+	}
+}
+
+func AttachExternal(opt *StartOptions) {
+	stateMu.Lock()
+	externalSocketPath = opt.SocketPath
+	PC = newPathControl(opt.ExecPath, opt.SocketPath, opt.StatePath)
+	lastOptions = opt
+	daemonStartTime = time.Now()
+	stateMu.Unlock()
+
+	slog.Info("========================================")
+	slog.Info("=== TAILSOCKS GO CORE ATTACHING (ROOT) ===", "version", coreVersion, "do_reset", opt.DoReset, "has_authkey", opt.AuthKey != "")
+	slog.Info("========================================")
+	GConfig.update(opt.Socks5Server, opt.Socks5User, opt.Socks5Pass, opt.DnsProxy)
+
+	go func() {
+		// Wait for socket
+		for i := 0; i < 20; i++ {
+			if _, err := os.Stat(opt.SocketPath); err == nil {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		EnsureIPNBusListener()
 		if opt.AuthKey != "" {
 			Login(opt.AuthKey)
 		} else {
@@ -479,11 +554,13 @@ func RestartDNS() {
 
 func Stop() {
 	StopWebUI()
-	_ = StopDriveServer()
+	StopDriveServer()
 	FlushDNS()
 	ResetDNSMetadata()
+	StopIPNBusListener()
 	stateMu.Lock()
 	defer stateMu.Unlock()
+	externalSocketPath = ""
 	daemonStartTime = time.Time{}
 
 	if dnsProxyCancel != nil {

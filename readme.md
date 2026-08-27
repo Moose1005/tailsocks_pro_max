@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  <strong>English</strong> | <a href="readme_ru.md">Русский</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/bropines/tailsocks/releases/latest"><img src="https://img.shields.io/github/v/release/bropines/tailsocks?style=for-the-badge&logo=github&logoColor=white&label=Latest%20Release&color=2ea44f" alt="Latest Release" /></a>
   <a href="https://github.com/bropines/tailsocks/releases"><img src="https://img.shields.io/github/downloads/bropines/tailsocks/total?style=for-the-badge&logo=android&logoColor=white&label=Downloads&color=3ddc84" alt="Downloads" /></a>
   <a href="https://github.com/tailscale/tailscale/releases/tag/v1.98.3"><img src="https://img.shields.io/badge/Tailscale_Core-v1.98.3-blue?style=for-the-badge&logo=tailscale&logoColor=white" alt="Tailscale Core" /></a>
@@ -20,10 +24,89 @@
     <img src="https://img.shields.io/badge/⬇_Download_APK-Release-2ea44f?style=for-the-badge&logo=android&logoColor=white" alt="Download Release APK" />
   </a>
   &nbsp;
+  <a href="https://boosty.to/pinus">
+    <img src="https://img.shields.io/badge/❤️_Donate-Boosty-f15f2c?style=for-the-badge" alt="Donate on Boosty" />
+  </a>
+  &nbsp;
   <a href="https://github.com/bropines/tailsocks/releases">
     <img src="https://img.shields.io/badge/⬇_All_Releases-GitHub-24292e?style=for-the-badge&logo=github&logoColor=white" alt="All Releases" />
   </a>
 </p>
+
+---
+
+> ## This is a fork
+>
+> **[Moose1005/tailsocks_pro_max](https://github.com/Moose1005/tailsocks_pro_max)** - a fork of
+> **[bropines/tailsocks](https://github.com/bropines/tailsocks)**, maintained as the TailSocks half
+> of **[InviZible Pro Max](https://github.com/Moose1005/InviZible-Pro-Max)**.
+>
+> InviZible Pro Max adds Tailscale as a fourth module beside DNSCrypt, Tor and Purple I2P. Android
+> allows only one `VpnService` at a time, so rather than running a second VPN it drives this build
+> over a signature-protected IPC bridge and routes app traffic through the SOCKS5 proxy, while
+> InviZible keeps the tunnel. No root required.
+>
+> ### What this fork adds on top of upstream
+>
+> | Change | Why |
+> |---|---|
+> | `InviZibleBridgeReceiver` | Status channel back to InviZible, resolved at runtime and addressed only to co-signed receivers |
+> | `TailscaledService` exported behind signature-level `pan.alexander.tordnscrypt.BRIDGE_PERMISSION` | Lets InviZible start and stop it from its foreground context. Same-UID callers are exempt, so standalone use is unaffected |
+> | `EXTRA_BRIDGE_SOCKS_ONLY` | Forces SOCKS-only operation so TUN never seizes the `VpnService` slot InviZible owns - honoured on a cold start *and* against an already-running instance |
+> | `appctr/build_x86_64_win.sh`, `appctr/build_all_win.sh` | Windows build scripts for the Go core. Upstream's `build.sh` has Linux-only NDK paths |
+> | [`docs/INVIZIBLE.md`](docs/INVIZIBLE.md) | Bridge setup and coexistence notes |
+>
+> Standalone TailSocks behaviour is deliberately untouched: every change above is inert unless
+> InviZible drives the bridge.
+>
+> Everything below is upstream's documentation. **TailSocks is bropines' work** - this fork exists
+> only to integrate it. If you find it useful, support the original author on
+> [Boosty](https://boosty.to/pinus) and star
+> [the upstream repository](https://github.com/bropines/tailsocks).
+
+---
+
+> ## 🔱 This is a fork
+>
+> **[](https://github.com/Moose1005/tailsocks_pro_max)** — a fork of
+> **[](https://github.com/bropines/tailsocks)**, maintained as the TailSocks
+> half of **[InviZible Pro Max](https://github.com/Moose1005/InviZible-Pro-Max)**.
+>
+> InviZible Pro Max adds Tailscale as a fourth module beside DNSCrypt, Tor and Purple I2P. Android
+> allows only one  at a time, so rather than running a second VPN it drives this build
+> over a signature-protected IPC bridge and routes app traffic through the SOCKS5 proxy, while
+> InviZible keeps the tunnel. No root required.
+>
+> **What this fork adds on top of upstream:**
+>
+> | Change | Why |
+> |---|---|
+> |  | Status channel back to InviZible, resolved at runtime and addressed only to co-signed receivers |
+> |  exported behind  (signature-level) | Lets InviZible start/stop it from its foreground context; same-UID callers are exempt, so standalone use is unchanged |
+> |  | Forces SOCKS-only operation, so TUN never seizes the  slot InviZible owns — honoured on a cold start *and* against an already-running instance |
+> | [1/4] Preparing and Patching Tailscale sources...
+-> Downloading sources...
+-> Applying atomic patches...
+Sources patched successfully.
+[2/4] Compiling binaries in PIE mode (x86_64 only)...
+-> Compiling Daemon (Core) [x86_64]...
+-> Compiling CLI (Console) [x86_64]...
+[3/4] Building appctr.aar (Gomobile Bridge, android/amd64 only)..., [1/4] Preparing and Patching Tailscale sources...
+-> Sources already exist and patched. Skipping download.
+[2/4] Compiling binaries in PIE mode (all ABIs)...
+-> ARM64 daemon+cli...
+-> ARM 32-bit daemon+cli...
+-> x86 32-bit daemon+cli...
+-> x86_64 daemon+cli...
+[3/4] Building appctr.aar (all 4 targets)... | Windows build scripts for the Go core; upstream's  has Linux-only NDK paths |
+> | [](docs/INVIZIBLE.md) | Bridge setup and coexistence notes |
+>
+> Standalone TailSocks behaviour is deliberately untouched — every change is inert unless InviZible
+> drives the bridge.
+>
+> Everything below is upstream's documentation. **TailSocks is bropines' work**; this fork exists
+> only to integrate it. If you find it useful, support the original author on
+> [Boosty](https://boosty.to/pinus) and star [the upstream repository](https://github.com/bropines/tailsocks).
 
 ---
 
@@ -261,6 +344,8 @@ cd ..
 | [AdGuard Setup](docs/ADGUARD.md) | Coexistence with system-wide ad blockers |
 | [InviZible Pro Setup](docs/INVIZIBLE.md) | Coexistence with DNSCrypt + Tor (InviZible Pro) |
 | [Serve & Funnel Guide](docs/SERVE_FUNNEL_GUIDE.md) | Exposing local ports and virtual services |
+| [Root Integration & Service Guide](docs/ROOT.md) | System-wide root autostart daemon, service.d, and CLI wrapper |
+| [Tasker & Automation Guide](docs/AUTOMATION.md) | Intent automation setup for Tasker, MacroDroid, Automate, and ADB |
 | [Roadmap](docs/ROADMAP.md) | Planned features and short-term goals |
 | [Changelog](CHANGELOG.md) | Full version history |
 
@@ -272,6 +357,26 @@ For users in restricted regions (e.g., where `controlplane.tailscale.com` is blo
 TailSocks bundles a native JNI implementation of [ByeDPI](https://github.com/hufyhang/byedpi) directly inside the app process. This allows bypassing SNI-based deep packet inspection (DPI) without spawning external binary processes.
 * **Security:** ByeDPI binds strictly to a randomized loopback IP (e.g., `127.182.201.43`) and a randomized port in the `127.0.0.0/8` subnet upon every startup. This prevents other applications on the device from discovering or connecting to the proxy via simple port scanning.
 * **Usage:** Enable **DPI Bypass (ByeDPI)** in Settings -> Network Tab -> Control Proxy settings and configure custom ByeDPI flags (default: `-s 1 -d split -r`).
+
+---
+
+## ⚡ Tasker & Automation Integration
+
+TailSocks supports background control via **Android Broadcast Intents**. You can automate connections using Tasker, MacroDroid, Automate, or `adb`.
+
+* **Target Receiver:** `io.github.bropines.tailscaled/.core.TaskerReceiver` (or package `io.github.bropines.tailscaled`)
+* **Supported Actions:**
+  * `io.github.bropines.tailscaled.action.CONNECT` (or `io.github.bropines.tailscaled.START`) — Start connection
+  * `io.github.bropines.tailscaled.action.DISCONNECT` (or `io.github.bropines.tailscaled.STOP`) — Stop connection
+  * `io.github.bropines.tailscaled.action.TOGGLE` (or `io.github.bropines.tailscaled.TOGGLE`) — Toggle connection state
+  * `io.github.bropines.tailscaled.action.RESTART` (or `io.github.bropines.tailscaled.RESTART`) — Restart connection
+
+#### Tasker Configuration Example:
+1. Action: **System** → **Send Intent**
+2. Action: `io.github.bropines.tailscaled.action.CONNECT`
+3. Target: **Broadcast Receiver**
+4. Package: `io.github.bropines.tailscaled`
+
 
 
 ---

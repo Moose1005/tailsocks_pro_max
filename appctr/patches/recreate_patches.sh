@@ -4,9 +4,10 @@ set -e
 # Change directory to the appctr directory
 cd "$(dirname "$0")/.."
 
-# Find Tailscale version from tailscale_src/VERSION.txt
-TS_VERSION=$(cat tailscale_src/VERSION.txt 2>/dev/null || echo "1.98.3")
-echo "-> Target Tailscale version: $TS_VERSION"
+# Find Tailscale version from TAILSCALE_VERSION file or tailscale_src
+TS_VERSION=$(cat TAILSCALE_VERSION 2>/dev/null || cat tailscale_src/VERSION.txt 2>/dev/null || echo "v1.98.3")
+TS_VERSION="${TS_VERSION#v}"
+echo "-> Target Tailscale version: v$TS_VERSION"
 
 # Ensure orig directory exists
 if [ ! -d "orig" ]; then
@@ -71,6 +72,18 @@ diff -u orig/cmd/tailscaled/netstack.go tailscale_src/cmd/tailscaled/netstack.go
 # 11-noop-dns-fallback.patch (net/dns/noop.go)
 diff -u orig/net/dns/noop.go tailscale_src/net/dns/noop.go > patches/11-noop-dns-fallback.patch || true
 
+# 12-socket-permissions.patch (safesocket/unixsocket.go)
+diff -u orig/safesocket/unixsocket.go tailscale_src/safesocket/unixsocket.go > patches/12-socket-permissions.patch || true
+
+# 13-android-osrouter.patch (wgengine/router/osrouter/router_linux.go, net/netmon/netmon_linux.go, and net/netmon/netmon_polling.go)
+{
+    diff -u orig/wgengine/router/osrouter/router_linux.go tailscale_src/wgengine/router/osrouter/router_linux.go || true
+    diff -u orig/net/netmon/netmon_linux.go tailscale_src/net/netmon/netmon_linux.go || true
+    diff -u orig/net/netmon/netmon_polling.go tailscale_src/net/netmon/netmon_polling.go || true
+} > patches/13-android-osrouter.patch || true
+
 echo "✅ Atomic patches generated successfully in appctr/patches/."
+
+
 
 

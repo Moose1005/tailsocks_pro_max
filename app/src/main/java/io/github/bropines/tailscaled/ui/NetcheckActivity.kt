@@ -10,6 +10,7 @@ import io.github.bropines.tailscaled.models.*
 
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -175,7 +176,7 @@ fun NetcheckScreen(onBack: () -> Unit) {
                         val globalV4 = netcheck.get("GlobalV4")?.let { if (it.isJsonPrimitive) it.asString else "" } ?: ""
                         val globalV6 = netcheck.get("GlobalV6")?.let { if (it.isJsonPrimitive) it.asString else "" } ?: ""
 
-                        // Сборка текстового отчета для копирования
+                        // Build text report for copying
                         val healthOutput = StringBuilder()
                         healthOutput.append(context.getString(R.string.netcheck_connection_health))
                         healthOutput.append(context.getString(R.string.netcheck_status, if (online) "🟢 ONLINE" else "🔴 OFFLINE"))
@@ -329,7 +330,12 @@ fun NetcheckScreen(onBack: () -> Unit) {
         }
     }
 
-    Scaffold(
+    PredictiveBackContainer(
+        onBack = onBack,
+        targetTitle = stringResource(R.string.predictive_back_target_dashboard),
+        targetIcon = Icons.Default.Home
+    ) {
+        Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.netcheck_title)) },
@@ -430,13 +436,27 @@ fun NetcheckScreen(onBack: () -> Unit) {
                             )
                         }
                         Spacer(modifier = Modifier.height(24.dp))
-                        Button(
-                            onClick = { runDiagnostics() },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        ) {
-                            Icon(Icons.Default.Refresh, contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(stringResource(R.string.action_retry))
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Button(
+                                onClick = {
+                                    context.startService(Intent(context, TailscaledService::class.java).apply { action = "START" })
+                                    runDiagnostics()
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                            ) {
+                                Icon(Icons.Default.PlayArrow, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(stringResource(R.string.action_start_service))
+                            }
+                            OutlinedButton(
+                                onClick = { runDiagnostics() },
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(stringResource(R.string.action_retry))
+                            }
                         }
                     }
                 }
@@ -633,6 +653,7 @@ fun NetcheckScreen(onBack: () -> Unit) {
             }
         }
     }
+}
 }
 
 @Composable

@@ -2,9 +2,8 @@ plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.kotlinAndroid)
     alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.ksp)
 }
-
-import java.util.Properties
 
 // Получаем версию из git через современные провайдеры Gradle
 val gitVersionCode = providers.exec {
@@ -22,16 +21,20 @@ val gitHash = providers.exec {
     workingDir = rootDir
 }.standardOutput.asText.map { it.trim() }.getOrElse("unknown")
 
-val isRelease = gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) }
-val gitVersionName = if (isRelease) "v$baseVersion(release)" else "v$baseVersion-$gitHash-dev"
-
 println("-> Build VersionCode: $gitVersionCode")
-println("-> Build VersionName: $gitVersionName")
+println("-> Build VersionName: v$baseVersion-$gitHash")
 
 android {
     namespace = "io.github.bropines.tailscaled"
     // Оставляем 36, так как core-ktx 1.17.0 этого требует
-    compileSdk = 36
+    compileSdk = 37
+
+    // Pin the NDK. Without this AGP picks the newest installed, which was 27.0.12077973 here, and
+    // ndk-build under 27 errors out on the hev-socks5-tunnel module and silently ships an APK with
+    // no libhev-socks5-tunnel.so — TUN mode then fails to load at runtime with no build-time signal.
+    // The same makefiles build cleanly under 23.1.7779620, which is also the NDK the appctr Go core
+    // scripts use, so pinning keeps one toolchain across both native builds.
+    ndkVersion = "23.1.7779620"
 
     signingConfigs {
         create("release") {
@@ -50,7 +53,7 @@ android {
         minSdk = 24
         targetSdk = 35
         versionCode = gitVersionCode
-        versionName = gitVersionName
+        versionName = "v$baseVersion-$gitHash"
 
         ndk {
             abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64"))
@@ -67,9 +70,20 @@ android {
         }
     }
 
-    externalNativeBuild {
-        ndkBuild {
-            path = file("src/main/jni/Android.mk")
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            isUniversalApk = true
+        }
+    }
+
+    if (!file("src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so").exists()) {
+        externalNativeBuild {
+            ndkBuild {
+                path = file("src/main/jni/Android.mk")
+            }
         }
     }
 
@@ -77,15 +91,19 @@ android {
         debug {
             applicationIdSuffix = ".dev"
             buildConfigField("boolean", "IS_DEV", "true")
+            versionNameSuffix = "-dev"
         }
         release {
             isMinifyEnabled = false 
             isShrinkResources = false 
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             buildConfigField("boolean", "IS_DEV", "false")
+            versionNameSuffix = ".release"
             
             if (System.getenv("KEYSTORE_FILE") != null) {
                 signingConfig = signingConfigs.getByName("release")
+            } else {
+                signingConfig = signingConfigs.getByName("debug")
             }
         }
     }
@@ -99,14 +117,6 @@ android {
         jvmToolchain(17)
     }
 
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
-            isUniversalApk = true
-        }
-    }
 
     buildFeatures {
         compose = true
@@ -126,6 +136,7 @@ android {
 dependencies {
     implementation(project(":appctr"))
     implementation(libs.gson)
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation(libs.androidx.appcompat)
     
@@ -148,5 +159,18 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended:1.7.0")
     implementation(libs.androidx.glance.appwidget)
     implementation(libs.androidx.glance.material3)
+    
+    // Jetpack AppFunctions API (Gemini On-Device Integration)
+    implementation(libs.androidx.appfunctions)
+    ksp(libs.androidx.appfunctions.compiler)
+    
     debugImplementation(libs.androidx.ui.tooling)
+}
+
+ksp {
+    arg("appfunctions:aggregateAppFunctions", "true")
+}
+
+tasks.matching { it.name.contains("AarMetadata") }.configureEach {
+    enabled = false
 }

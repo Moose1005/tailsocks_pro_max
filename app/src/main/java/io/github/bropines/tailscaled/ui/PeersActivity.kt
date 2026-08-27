@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -27,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import appctr.Appctr
 import io.github.bropines.tailscaled.ui.theme.TailSocksTheme
 import com.google.gson.Gson
@@ -115,8 +117,13 @@ fun PeersScreen(onBack: () -> Unit) {
 
     LaunchedEffect(Unit) { loadPeers() }
 
-    Scaffold(
-        topBar = {
+    PredictiveBackContainer(
+        onBack = onBack,
+        targetTitle = stringResource(R.string.predictive_back_target_dashboard),
+        targetIcon = Icons.Default.Home
+    ) {
+        Scaffold(
+            topBar = {
             Column {
                 TopAppBar(title = { Text(stringResource(R.string.peers_title)) },
                     navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back)) } },
@@ -124,19 +131,11 @@ fun PeersScreen(onBack: () -> Unit) {
                         loadPeers() 
                     }) { Icon(Icons.Default.Refresh, stringResource(R.string.action_refresh)) } })
                 
-                OutlinedTextField(
+                CompactSearchBar(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                    placeholder = { Text(stringResource(R.string.peers_search_placeholder)) },
-                    leadingIcon = { Icon(Icons.Default.Search, null) },
-                    trailingIcon = { if (searchQuery.isNotEmpty()) IconButton(onClick = { searchQuery = "" }) { Icon(Icons.Default.Close, null) } },
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                    )
+                    placeholderText = stringResource(R.string.peers_search_placeholder),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
         }
@@ -179,6 +178,7 @@ fun PeersScreen(onBack: () -> Unit) {
             )
         }
     }
+}
 }
 
 private fun sendFileToPeer(context: Context, uri: Uri, peer: PeerData, scope: CoroutineScope) {

@@ -68,6 +68,7 @@ fun ProxySettingsDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 val proxyOptions = listOf(
+                    "CONTROL_PLANE" to stringResource(R.string.admin_proxy_control_plane),
                     "DIRECT" to stringResource(R.string.admin_proxy_direct),
                     "LOCAL_SOCKS5" to stringResource(R.string.admin_proxy_local_socks5),
                     "CUSTOM_SOCKS5" to stringResource(R.string.admin_proxy_custom_socks5)
@@ -82,7 +83,13 @@ fun ProxySettingsDialog(
                     }
                 }
 
-                if (proxyMode == "CUSTOM_SOCKS5") {
+                if (proxyMode == "CONTROL_PLANE") {
+                    Text(
+                        stringResource(R.string.admin_proxy_control_plane_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                } else if (proxyMode == "CUSTOM_SOCKS5") {
                     Spacer(Modifier.height(4.dp))
                     OutlinedTextField(
                         value = proxyHost,
@@ -90,15 +97,27 @@ fun ProxySettingsDialog(
                         label = { Text(stringResource(R.string.admin_proxy_socks5_host)) },
                         placeholder = { Text(stringResource(R.string.admin_proxy_socks5_host_placeholder)) },
                         singleLine = true,
+                        maxLines = 1,
+                        shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
                         value = proxyPort,
-                        onValueChange = { proxyPort = it },
+                        onValueChange = { newValue ->
+                            val digits = newValue.filter { it.isDigit() }
+                            if (digits.length <= 5) {
+                                val num = digits.toIntOrNull()
+                                if (num == null || num <= 65535) {
+                                    proxyPort = digits
+                                }
+                            }
+                        },
                         label = { Text(stringResource(R.string.admin_proxy_socks5_port)) },
                         placeholder = { Text(stringResource(R.string.admin_proxy_socks5_port_placeholder)) },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         singleLine = true,
+                        maxLines = 1,
+                        shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
@@ -106,6 +125,8 @@ fun ProxySettingsDialog(
                         onValueChange = { proxyUser = it },
                         label = { Text(stringResource(R.string.admin_proxy_username)) },
                         singleLine = true,
+                        maxLines = 1,
+                        shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
@@ -113,6 +134,8 @@ fun ProxySettingsDialog(
                         onValueChange = { proxyPass = it },
                         label = { Text(stringResource(R.string.admin_proxy_password)) },
                         singleLine = true,
+                        maxLines = 1,
+                        shape = RoundedCornerShape(10.dp),
                         modifier = Modifier.fillMaxWidth()
                     )
                 } else if (proxyMode == "LOCAL_SOCKS5") {

@@ -9,18 +9,14 @@ import (
 
 // GetStatusFromAPI returns the daemon status as JSON.
 func GetStatusFromAPI() string {
-	if !IsRunning() {
-		return `{"Error": "Tailscaled is not running."}`
-	}
-	slog.Info("LocalAPI: [GET] /localapi/v0/status?peers=true")
-	data, err := doLocalRequest("GET", "/localapi/v0/status?peers=true", nil)
+	data, err := GetStatusJSON(true)
 	if err != nil {
 		return fmt.Sprintf(`{"Error": %q}`, err.Error())
 	}
-	if len(data) == 0 {
+	if data == "" {
 		return `{"Error": "Status API returned empty response"}`
 	}
-	return string(data)
+	return data
 }
 
 // GetDnsStatusJSON returns DNS information for DnsActivity.
@@ -29,28 +25,100 @@ func GetDnsStatusJSON() string {
 		return "{}"
 	}
 
+	EnsureIPNBusListener()
+
 	socks, _, _, dns := GConfig.get()
 
-	// Build the structure expected by DnsActivity.kt.
 	type dnsAddr struct {
 		Addr string `json:"Addr"`
 	}
 	type tailnetInfo struct {
-		MagicDNSEnabled bool    `json:"MagicDNSEnabled"`
-		MagicDNSSuffix  string  `json:"MagicDNSSuffix"`
-		SelfDNSName     string  `json:"SelfDNSName"`
+		MagicDNSEnabled bool   `json:"MagicDNSEnabled"`
+		MagicDNSSuffix  string `json:"MagicDNSSuffix"`
+		SelfDNSName     string `json:"SelfDNSName"`
 	}
 	type status struct {
-		TailscaleDNS   bool                    `json:"TailscaleDNS"`
-		CurrentTailnet tailnetInfo             `json:"CurrentTailnet"`
-		SplitDNSRoutes map[string][]dnsAddr   `json:"SplitDNSRoutes"`
+		TailscaleDNS   bool                 `json:"TailscaleDNS"`
+		CurrentTailnet tailnetInfo          `json:"CurrentTailnet"`
+		SplitDNSRoutes map[string][]dnsAddr `json:"SplitDNSRoutes"`
 	}
 
+	bs := GetBusState()
+	effectiveSuffix := magicDNSSuffix
+
+	selfDNS := ""
+	if bs.Self != nil && bs.Self.DNSName != "" {
+		selfDNS = strings.TrimSuffix(bs.Self.DNSName, ".")
+	}
+
+	// Always query /localapi/v0/dns-config to sync live netmap DNS routes and suffix
+	var dnsConfig struct {
+		Resolvers []struct {
+			Addr string `json:"Addr"`
+		} `json:"Resolvers"`
+		Routes map[string][]struct {
+			Addr string `json:"Addr"`
+		} `json:"Routes"`
+		Domains []string `json:"Domains"`
+	}
+
+	rawConfig, err := doLocalRequest("GET", "/localapi/v0/dns-config", nil)
+	if err == nil && json.Unmarshal(rawConfig, &dnsConfig) == nil {
+		if effectiveSuffix == "" && len(dnsConfig.Domains) > 0 {
+			effectiveSuffix = strings.ToLower(strings.Trim(dnsConfig.Domains[0], "."))
+		}
+		for domain, resolvers := range dnsConfig.Routes {
+			d := strings.ToLower(strings.Trim(domain, "."))
+			var ips []string
+			for _, r := range resolvers {
+				if r.Addr != "" {
+					ips = append(ips, r.Addr)
+				}
+			}
+			if len(ips) == 0 {
+				ips = []string{"100.100.100.100"}
+			}
+			splitDNSCache.Store(d, ips)
+		}
+	}
+
+	// Fallback to LocalAPI /status if bus state has not received NetMap yet
+	if effectiveSuffix == "" || selfDNS == "" {
+		var statusAPI struct {
+			MagicDNSSuffix string `json:"MagicDNSSuffix"`
+			CurrentTailnet struct {
+				Name            string `json:"Name"`
+				MagicDNSSuffix  string `json:"MagicDNSSuffix"`
+				MagicDNSEnabled bool   `json:"MagicDNSEnabled"`
+			} `json:"CurrentTailnet"`
+			Self struct {
+				DNSName string `json:"DNSName"`
+			} `json:"Self"`
+		}
+
+		rawStatus, err := doLocalRequest("GET", "/localapi/v0/status", nil)
+		if err == nil && json.Unmarshal(rawStatus, &statusAPI) == nil {
+			if effectiveSuffix == "" {
+				if statusAPI.MagicDNSSuffix != "" {
+					effectiveSuffix = statusAPI.MagicDNSSuffix
+				} else if statusAPI.CurrentTailnet.MagicDNSSuffix != "" {
+					effectiveSuffix = statusAPI.CurrentTailnet.MagicDNSSuffix
+				}
+			}
+			if selfDNS == "" && statusAPI.Self.DNSName != "" {
+				selfDNS = strings.TrimSuffix(statusAPI.Self.DNSName, ".")
+			}
+		}
+	}
+
+	isMagicEnabled := effectiveSuffix != ""
+
 	res := status{
-		TailscaleDNS: dns != "",
+		TailscaleDNS: dns != "" || isMagicEnabled,
 		CurrentTailnet: tailnetInfo{
-			MagicDNSEnabled: magicDNSSuffix != "",
-			MagicDNSSuffix:  magicDNSSuffix,
+			MagicDNSEnabled: isMagicEnabled,
+			MagicDNSSuffix:  effectiveSuffix,
+			SelfDNSName:     selfDNS,
 		},
 		SplitDNSRoutes: make(map[string][]dnsAddr),
 	}
@@ -67,17 +135,19 @@ func GetDnsStatusJSON() string {
 		return true
 	})
 
-	// Try to find own node name in the nodes cache.
-	if socks != "" { 
+	// Fallback to nodes cache if selfDNS not obtained from LocalAPI or Bus
+	if res.CurrentTailnet.SelfDNSName == "" && socks != "" && effectiveSuffix != "" {
 		nodesCache.Range(func(key, value interface{}) bool {
 			name := key.(string)
-			if strings.HasSuffix(name, magicDNSSuffix) && !strings.Contains(strings.TrimSuffix(name, magicDNSSuffix), ".") {
+			if strings.HasSuffix(name, effectiveSuffix) && !strings.Contains(strings.TrimSuffix(name, effectiveSuffix), ".") {
 				res.CurrentTailnet.SelfDNSName = name
 				return false
 			}
 			return true
 		})
 	}
+
+	slog.Info("GetDnsStatusJSON", "magic", res.CurrentTailnet.MagicDNSSuffix, "self", res.CurrentTailnet.SelfDNSName, "routesCount", len(res.SplitDNSRoutes))
 
 	data, _ := json.Marshal(res)
 	return string(data)
@@ -88,18 +158,31 @@ func GetBackendState() string {
 	if !IsRunning() {
 		return "Stopped"
 	}
+	bs := GetBusState()
+	if bs.BackendState != "" && bs.BackendState != "NeedsLogin" {
+		return bs.BackendState
+	}
+
 	data, err := doLocalRequest("GET", "/localapi/v0/status", nil)
 	if err != nil {
+		if bs.BackendState != "" {
+			return bs.BackendState
+		}
 		return "Error"
 	}
 	var res struct {
 		BackendState string `json:"BackendState"`
 	}
-	if err := json.Unmarshal(data, &res); err != nil {
-		slog.Error("LocalAPI: Failed to parse BackendState", "err", err)
-		return "Error"
+	if err := json.Unmarshal(data, &res); err == nil && res.BackendState != "" {
+		busStateMu.Lock()
+		busState.BackendState = res.BackendState
+		if res.BackendState == "Running" {
+			busState.AuthURL = ""
+		}
+		busStateMu.Unlock()
+		return res.BackendState
 	}
-	return res.BackendState
+	return bs.BackendState
 }
 
 // GetSelfDNSName returns the MagicDNS name of the current device.
@@ -107,6 +190,11 @@ func GetSelfDNSName() string {
 	if !IsRunning() {
 		return ""
 	}
+	bs := GetBusState()
+	if bs.Self != nil && bs.Self.DNSName != "" {
+		return strings.TrimSuffix(bs.Self.DNSName, ".")
+	}
+
 	data, err := doLocalRequest("GET", "/localapi/v0/status", nil)
 	if err != nil {
 		return ""

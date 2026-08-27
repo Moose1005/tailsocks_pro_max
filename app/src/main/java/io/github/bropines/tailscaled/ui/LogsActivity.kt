@@ -27,8 +27,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -109,6 +111,19 @@ fun getDebugHeader(context: Context): String {
     """.trimIndent()
 }
 
+fun buildFullLogString(context: Context): String {
+    val header = getDebugHeader(context)
+    val goLogs = try { Appctr.getLogs() } catch (e: Exception) { "" }
+    val dataDir = context.filesDir.parentFile ?: context.filesDir
+    val logFile = java.io.File(dataDir, "logs/tailscaled.log")
+    val rootLogs = if (logFile.exists()) {
+        try {
+            "\n--- ROOT DAEMON LOGS (tailscaled.log) ---\n" + logFile.readText()
+        } catch (e: Exception) { "" }
+    } else ""
+    return header + goLogs + rootLogs
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogsScreen(onBack: () -> Unit) {
@@ -125,7 +140,21 @@ fun LogsScreen(onBack: () -> Unit) {
     var scale by remember { mutableFloatStateOf(1f) }
     val listState = rememberLazyListState()
 
-    val categories = listOf("ALL", "ERROR", "CORE", "TAILSCALE", "OTHER")
+    val isRootMode = remember { GlobalSettings.isRootModeEnabled(context) }
+    val categoryItems = remember(isRootMode) {
+        val list = mutableListOf(
+            SegmentedChipItem("ALL", Icons.AutoMirrored.Filled.List),
+            SegmentedChipItem("ERROR", Icons.Default.Error, containerColor = Color(0xFFEF5350).copy(alpha = 0.25f), contentColor = Color(0xFFEF5350)),
+            SegmentedChipItem("CORE", Icons.Default.Memory, containerColor = Color(0xFF42A5F5).copy(alpha = 0.25f), contentColor = Color(0xFF1E88E5)),
+            SegmentedChipItem("TAILSCALE", Icons.Default.VpnLock, containerColor = Color(0xFF66BB6A).copy(alpha = 0.25f), contentColor = Color(0xFF43A047))
+        )
+        if (isRootMode) {
+            list.add(SegmentedChipItem("ROOT", Icons.Default.Terminal, containerColor = Color(0xFF9C27B0).copy(alpha = 0.25f), contentColor = Color(0xFF9C27B0)))
+        }
+        list.add(SegmentedChipItem("OTHER", Icons.Default.Category, containerColor = Color(0xFFFFA726).copy(alpha = 0.25f), contentColor = Color(0xFFFB8C00)))
+        list.toList()
+    }
+    val categories = remember(categoryItems) { categoryItems.map { it.title } }
 
     val displayedLogs = remember(allLogs, selectedCategory, searchQuery) {
         allLogs.filter { log ->
@@ -139,7 +168,7 @@ fun LogsScreen(onBack: () -> Unit) {
         uri?.let {
             coroutineScope.launch(Dispatchers.IO) {
                 try {
-                    val fullLog = getDebugHeader(context) + Appctr.getLogs()
+                    val fullLog = buildFullLogString(context)
                     context.contentResolver.openOutputStream(it)?.use { os ->
                         OutputStreamWriter(os).use { writer -> writer.write(fullLog) }
                     }
@@ -154,10 +183,33 @@ fun LogsScreen(onBack: () -> Unit) {
     fun loadLogsData(manual: Boolean = false) {
         if (manual) isRefreshing = true
         coroutineScope.launch(Dispatchers.IO) {
-            val jsonString = try { Appctr.getLogsJSON() } catch (e: Exception) { "[]" }
-            val logsList: List<LogEntry> = try {
+            var jsonString = try { Appctr.getLogsJSON() } catch (e: Exception) { "[]" }
+            var logsList: List<LogEntry> = try {
                 Gson().fromJson(jsonString, object : TypeToken<List<LogEntry>>() {}.type)
             } catch (e: Exception) { emptyList() }
+
+            if (GlobalSettings.isRootModeEnabled(context)) {
+                val dataDir = context.filesDir.parentFile ?: context.filesDir
+                val logFile = java.io.File(dataDir, "logs/tailscaled.log")
+                if (logFile.exists()) {
+                    try {
+                        val fileLines = logFile.readLines().takeLast(300)
+                        val parsed = fileLines.map { line ->
+                            LogEntry(
+                                timestamp = if (line.length >= 19) line.substring(0, 19) else "",
+                                level = if (line.contains("ERROR") || line.contains("error")) "ERROR" else "INFO",
+                                category = "ROOT",
+                                message = line
+                            )
+                        }
+                        if (parsed.isNotEmpty()) {
+                            logsList = (logsList + parsed).sortedBy { it.timestamp.takeLast(8) }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("LogsActivity", "Error reading root log file: ${e.message}")
+                    }
+                }
+            }
 
             withContext(Dispatchers.Main) {
                 allLogs = logsList
@@ -179,49 +231,78 @@ fun LogsScreen(onBack: () -> Unit) {
         }
     }
 
-    Scaffold(
-        topBar = {
-            Column {
-                TopAppBar(
-                    title = { Text(stringResource(R.string.logs_title)) },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back)) }
-                    },
-                    actions = {
-                        IconButton(onClick = { 
-                            Appctr.flushDNS()
-                            Toast.makeText(context, context.getString(R.string.logs_dns_flushed), Toast.LENGTH_SHORT).show()
-                        }) { Icon(Icons.Default.CleaningServices, contentDescription = stringResource(R.string.logs_cd_flush_dns)) }
+    PredictiveBackContainer(
+        onBack = onBack,
+        targetTitle = stringResource(R.string.predictive_back_target_dashboard),
+        targetIcon = Icons.Default.Home
+    ) {
+        Scaffold(
+            topBar = {
+                Column {
+                    TopAppBar(
+                        title = { Text(stringResource(R.string.logs_title)) },
+                        navigationIcon = {
+                            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back)) }
+                        },
+                        actions = {
+                            IconButton(onClick = { 
+                                Appctr.flushDNS()
+                                Toast.makeText(context, context.getString(R.string.logs_dns_flushed), Toast.LENGTH_SHORT).show()
+                            }) { Icon(Icons.Default.CleaningServices, contentDescription = stringResource(R.string.logs_cd_flush_dns)) }
 
-                        IconButton(onClick = { 
-                            val fullLog = getDebugHeader(context) + Appctr.getLogs()
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("TailSocks Logs", fullLog))
-                            Toast.makeText(context, context.getString(R.string.logs_copied), Toast.LENGTH_SHORT).show()
-                        }) { Icon(Icons.Default.ContentCopy, contentDescription = stringResource(R.string.action_copy)) }
-                        
-                        IconButton(onClick = { saveFileLauncher.launch("tailsocks_logs_${System.currentTimeMillis()}.txt") }) { Icon(Icons.Default.Save, contentDescription = stringResource(R.string.action_save)) }
-                    }
-                )
-                
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = { searchQuery = it },
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                    placeholder = { Text(stringResource(R.string.logs_search_placeholder)) },
-                    leadingIcon = { Icon(Icons.Default.Search, null) },
-                    trailingIcon = { if (searchQuery.isNotEmpty()) IconButton(onClick = { searchQuery = "" }) { Icon(Icons.Default.Close, null) } },
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp)
-                )
+                            IconButton(onClick = { 
+                                val fullLog = buildFullLogString(context)
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("TailSocks Logs", fullLog))
+                                Toast.makeText(context, context.getString(R.string.logs_copied), Toast.LENGTH_SHORT).show()
+                            }) { Icon(Icons.Default.ContentCopy, contentDescription = stringResource(R.string.action_copy)) }
+                            
+                            IconButton(onClick = { saveFileLauncher.launch("tailsocks_logs_${System.currentTimeMillis()}.txt") }) { Icon(Icons.Default.Save, contentDescription = stringResource(R.string.action_save)) }
 
-                LazyRow(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(categories) { category ->
-                        FilterChip(selected = selectedCategory == category, onClick = { selectedCategory = category; isAutoScroll = true }, label = { Text(category) })
-                    }
+                            if (GlobalSettings.isRootModeEnabled(context)) {
+                                IconButton(onClick = {
+                                    coroutineScope.launch(Dispatchers.IO) {
+                                        try {
+                                            val dataDir = context.filesDir.parentFile ?: context.filesDir
+                                            val logFile = java.io.File(dataDir, "logs/tailscaled.log")
+                                            if (logFile.exists()) logFile.writeText("")
+                                            withContext(Dispatchers.Main) {
+                                                allLogs = emptyList()
+                                                Toast.makeText(context, context.getString(R.string.logs_cleared), Toast.LENGTH_SHORT).show()
+                                            }
+                                        } catch (e: Exception) {
+                                            withContext(Dispatchers.Main) {
+                                                Toast.makeText(context, context.getString(R.string.error_generic, e.message), Toast.LENGTH_LONG).show()
+                                            }
+                                        }
+                                    }
+                                }) { Icon(Icons.Default.DeleteForever, contentDescription = stringResource(R.string.action_clear)) }
+                            }
+                        }
+                    )
+                    
+                    CompactSearchBar(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        placeholderText = stringResource(R.string.logs_search_placeholder),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+
+                    val selectedCategoryIndex = categories.indexOf(selectedCategory).coerceAtLeast(0)
+                    ScrollableSlidingSegmentedChips(
+                        items = categoryItems,
+                        selectedIndex = selectedCategoryIndex,
+                        onOptionSelected = { idx ->
+                            selectedCategory = categories[idx]
+                            isAutoScroll = true
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                        height = 36.dp
+                    )
                 }
-            }
-        },
+            },
         floatingActionButton = {
             FloatingActionButton(onClick = {
                 coroutineScope.launch(Dispatchers.IO) {
@@ -262,4 +343,5 @@ fun LogsScreen(onBack: () -> Unit) {
             }
         }
     }
+}
 }

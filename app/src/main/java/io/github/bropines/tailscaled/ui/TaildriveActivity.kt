@@ -28,6 +28,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -71,11 +73,22 @@ data class LocalShare(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TaildriveScreen(onBack: () -> Unit) {
-    val context = LocalContext.current
+    TaildriveTabContent(onBack = onBack)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TaildriveTabContent(onBack: (() -> Unit)? = null) {
+    PredictiveBackContainer(
+        onBack = onBack,
+        targetTitle = stringResource(R.string.predictive_back_target_files_hub),
+        targetIcon = Icons.Default.Folder
+    ) {
+        val context = LocalContext.current
     val activeAccount = remember { AccountManager.getActiveAccount(context) }
     val prefs = remember(activeAccount.id) { context.getSharedPreferences("appctr_${activeAccount.id}", Context.MODE_PRIVATE) }
 
-    var isEnabled by remember { mutableStateOf(prefs.getBoolean("taildrive_enabled", false)) }
+    var isEnabled by remember { mutableStateOf(prefs.getBoolean("taildrive_enabled", true)) }
     var sharesJson = prefs.getString("taildrive_shares", "[]") ?: "[]"
     val gson = Gson()
     val listType = object : TypeToken<ArrayList<LocalShare>>() {}.type
@@ -170,261 +183,375 @@ fun TaildriveScreen(onBack: () -> Unit) {
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(stringResource(R.string.taildrive_title))
-                        Text(activeAccount.name, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+    var showChoiceDialog by remember { mutableStateOf(false) }
+
+    if (showChoiceDialog) {
+        AlertDialog(
+            onDismissRequest = { showChoiceDialog = false },
+            title = { Text(stringResource(R.string.taildrive_cd_add)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Choose how to add folder:", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedCard(
+                        onClick = {
+                            showChoiceDialog = false
+                            dirPickerLauncher.launch(null)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(Icons.Default.FolderOpen, null, tint = MaterialTheme.colorScheme.primary)
+                            Column {
+                                Text("System Folder Picker", fontWeight = FontWeight.Bold)
+                                Text("Browse and select folder visually", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
                     }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.back))
+
+                    OutlinedCard(
+                        onClick = {
+                            showChoiceDialog = false
+                            showAddShareDialogWithPath("") { newShare ->
+                                if (shares.any { it.name.lowercase() == newShare.name.lowercase() }) {
+                                    Toast.makeText(context, context.getString(R.string.taildrive_err_name_exists), Toast.LENGTH_SHORT).show()
+                                } else {
+                                    shares.add(newShare)
+                                    saveShares(prefs, shares)
+                                    triggerServiceSettingsUpdate(context)
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(Icons.Default.Edit, null, tint = MaterialTheme.colorScheme.primary)
+                            Column {
+                                Text("Enter Path Manually", fontWeight = FontWeight.Bold)
+                                Text("Type path (e.g. /storage/emulated/0/Download)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
                     }
                 }
-            )
-        },
-        floatingActionButton = {
-            if (isEnabled && hasStoragePermission) {
-                FloatingActionButton(onClick = {
-                    dirPickerLauncher.launch(null)
-                }) {
-                    Icon(Icons.Default.Add, stringResource(R.string.taildrive_cd_add))
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showChoiceDialog = false }) {
+                    Text(stringResource(R.string.action_cancel))
                 }
             }
-        }
-    ) { padding ->
-        Column(
+        )
+    }
+
+    val mainContent = @Composable { paddingValues: PaddingValues ->
+        LazyColumn(
             modifier = Modifier
-                .padding(padding)
+                .padding(paddingValues)
                 .fillMaxSize()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            contentPadding = PaddingValues(top = 12.dp, bottom = 88.dp)
         ) {
             // Permission Card
             if (!hasStoragePermission) {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(stringResource(R.string.taildrive_perm_required), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                        Spacer(Modifier.height(8.dp))
-                        Text(stringResource(R.string.taildrive_perm_desc), style = MaterialTheme.typography.bodyMedium)
-                        Spacer(Modifier.height(16.dp))
-                        Button(
-                            onClick = {
-                                requestStoragePermission(context)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                        ) {
-                            Text(stringResource(R.string.taildrive_grant_perm))
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(stringResource(R.string.taildrive_perm_required), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(8.dp))
+                            Text(stringResource(R.string.taildrive_perm_desc), style = MaterialTheme.typography.bodyMedium)
+                            Spacer(Modifier.height(16.dp))
+                            Button(
+                                onClick = {
+                                    requestStoragePermission(context)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                            ) {
+                                Text(stringResource(R.string.taildrive_grant_perm))
+                            }
                         }
                     }
                 }
             }
 
             // Enable Toggle Row
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+            item {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(stringResource(R.string.taildrive_enable_title), fontWeight = FontWeight.Bold)
-                        Text(
-                            stringResource(R.string.taildrive_enable_desc),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = isEnabled,
-                        onCheckedChange = { checked ->
-                            if (checked && !checkStoragePermission(context)) {
-                                requestStoragePermission(context)
-                            } else {
-                                isEnabled = checked
-                                prefs.edit().putBoolean("taildrive_enabled", checked).commit()
-                                triggerServiceSettingsUpdate(context)
-                            }
-                        }
-                    )
-                }
-            }
-
-            // Enable TailDrive Proxy Card
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(stringResource(R.string.taildrive_enable_proxy_title), fontWeight = FontWeight.Bold)
+                            Text(stringResource(R.string.taildrive_enable_title), fontWeight = FontWeight.Bold)
                             Text(
-                                stringResource(R.string.taildrive_enable_proxy_desc),
+                                stringResource(R.string.taildrive_enable_desc),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         Switch(
-                            checked = isProxyEnabled,
+                            checked = isEnabled,
                             onCheckedChange = { checked ->
-                                isProxyEnabled = checked
-                                prefs.edit().putBoolean("taildrive_proxy_enabled", checked).commit()
-                                triggerServiceSettingsUpdate(context)
+                                if (checked && !checkStoragePermission(context)) {
+                                    requestStoragePermission(context)
+                                } else {
+                                    isEnabled = checked
+                                    prefs.edit().putBoolean("taildrive_enabled", checked).commit()
+                                    triggerServiceSettingsUpdate(context)
+                                }
                             }
                         )
                     }
+                }
+            }
 
-                    if (isProxyEnabled) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        Spacer(modifier = Modifier.height(12.dp))
+            // Share Full Internal Storage Toggle Card
+            item {
+                var isFullStorageShared by remember {
+                    mutableStateOf(shares.any { it.path == "/storage/emulated/0" || it.path == "/storage/emulated/0/" })
+                }
 
-                        // IP Input Field
-                        OutlinedTextField(
-                            value = proxyIp,
-                            onValueChange = { ip ->
-                                proxyIp = ip
-                                prefs.edit().putString("taildrive_proxy_ip", ip).commit()
-                                triggerServiceSettingsUpdate(context)
-                            },
-                            label = { Text(stringResource(R.string.taildrive_proxy_ip)) },
-                            placeholder = { Text("127.0.0.1") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isFullStorageShared) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Icon(Icons.Default.SdCard, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                                Text("Share Full Storage", fontWeight = FontWeight.Bold)
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Stream entire internal memory (/storage/emulated/0) via Taildrive",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = isFullStorageShared,
+                            onCheckedChange = { checked ->
+                                if (checked) {
+                                    if (!checkStoragePermission(context)) {
+                                        requestStoragePermission(context)
+                                    }
+                                    if (!shares.any { it.path == "/storage/emulated/0" || it.path == "/storage/emulated/0/" }) {
+                                        shares.add(LocalShare("sdcard", "/storage/emulated/0"))
+                                        saveShares(prefs, shares)
+                                        triggerServiceSettingsUpdate(context)
+                                    }
+                                    isFullStorageShared = true
+                                } else {
+                                    shares.removeAll { it.path == "/storage/emulated/0" || it.path == "/storage/emulated/0/" }
+                                    saveShares(prefs, shares)
+                                    triggerServiceSettingsUpdate(context)
+                                    isFullStorageShared = false
+                                }
+                            }
                         )
+                    }
+                }
+            }
 
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // Port Input Field
-                        OutlinedTextField(
-                            value = proxyPort,
-                            onValueChange = { port ->
-                                val cleanPort = port.filter { it.isDigit() }
-                                proxyPort = cleanPort
-                                prefs.edit().putString("taildrive_proxy_port", cleanPort).commit()
-                                triggerServiceSettingsUpdate(context)
-                            },
-                            label = { Text(stringResource(R.string.taildrive_proxy_port)) },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // Require Authentication Row
+            // Enable TailDrive Proxy Card
+            item {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column {
-                                Text(stringResource(R.string.taildrive_require_auth), fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(stringResource(R.string.taildrive_enable_proxy_title), fontWeight = FontWeight.Bold)
                                 Text(
-                                    stringResource(R.string.taildrive_require_auth_desc),
-                                    style = MaterialTheme.typography.labelSmall,
+                                    stringResource(R.string.taildrive_enable_proxy_desc),
+                                    style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                             Switch(
-                                checked = isProxyAuthEnabled,
+                                checked = isProxyEnabled,
                                 onCheckedChange = { checked ->
-                                    isProxyAuthEnabled = checked
-                                    prefs.edit().putBoolean("taildrive_proxy_auth_enabled", checked).commit()
+                                    isProxyEnabled = checked
+                                    prefs.edit().putBoolean("taildrive_proxy_enabled", checked).commit()
                                     triggerServiceSettingsUpdate(context)
                                 }
                             )
                         }
 
-                        if (isProxyAuthEnabled) {
+                        if (isProxyEnabled) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             Spacer(modifier = Modifier.height(12.dp))
 
+                            // IP Input Field
                             OutlinedTextField(
-                                value = proxyUsername,
-                                onValueChange = { user ->
-                                    proxyUsername = user
-                                    prefs.edit().putString("taildrive_proxy_username", user).commit()
+                                value = proxyIp,
+                                onValueChange = { ip ->
+                                    proxyIp = ip
+                                    prefs.edit().putString("taildrive_proxy_ip", ip).commit()
                                     triggerServiceSettingsUpdate(context)
                                 },
-                                label = { Text(stringResource(R.string.taildrive_username)) },
+                                label = { Text(stringResource(R.string.taildrive_proxy_ip)) },
+                                placeholder = { Text("127.0.0.1") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
 
-                            Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
 
+                            // Port Input Field
                             OutlinedTextField(
-                                value = proxyPassword,
-                                onValueChange = { pass ->
-                                    proxyPassword = pass
-                                    prefs.edit().putString("taildrive_proxy_password", pass).commit()
-                                    triggerServiceSettingsUpdate(context)
+                                value = proxyPort,
+                                onValueChange = { port ->
+                                    val cleanPort = port.filter { it.isDigit() }
+                                    if (cleanPort.length <= 5) {
+                                        val num = cleanPort.toIntOrNull()
+                                        if (num == null || num <= 65535) {
+                                            proxyPort = cleanPort
+                                            prefs.edit().putString("taildrive_proxy_port", cleanPort).commit()
+                                            triggerServiceSettingsUpdate(context)
+                                        }
+                                    }
                                 },
-                                label = { Text(stringResource(R.string.taildrive_password)) },
+                                label = { Text(stringResource(R.string.taildrive_proxy_port)) },
                                 singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 modifier = Modifier.fillMaxWidth()
                             )
-                        }
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
 
-                        // Copyable URL Card
-                        val formattedUrl = remember(proxyIp, proxyPort, isProxyAuthEnabled, proxyUsername, proxyPassword) {
-                            if (isProxyAuthEnabled && proxyUsername.isNotEmpty() && proxyPassword.isNotEmpty()) {
-                                "http://$proxyUsername:$proxyPassword@$proxyIp:$proxyPort"
-                            } else {
-                                "http://$proxyIp:$proxyPort"
-                            }
-                        }
-
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
+                            // Require Authentication Row
                             Row(
-                                modifier = Modifier.padding(12.dp),
+                                modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
-                                Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(stringResource(R.string.taildrive_webdav_url_title), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSecondaryContainer)
-                                    Spacer(modifier = Modifier.height(4.dp))
+                                Column {
+                                    Text(stringResource(R.string.taildrive_require_auth), fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
                                     Text(
-                                        text = formattedUrl,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                        stringResource(R.string.taildrive_require_auth_desc),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                IconButton(
-                                    onClick = {
-                                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                        val clip = android.content.ClipData.newPlainText("WebDAV URL", formattedUrl)
-                                        clipboard.setPrimaryClip(clip)
-                                        Toast.makeText(context, context.getString(R.string.taildrive_copied_url), Toast.LENGTH_SHORT).show()
+                                Switch(
+                                    checked = isProxyAuthEnabled,
+                                    onCheckedChange = { checked ->
+                                        isProxyAuthEnabled = checked
+                                        prefs.edit().putBoolean("taildrive_proxy_auth_enabled", checked).commit()
+                                        triggerServiceSettingsUpdate(context)
                                     }
+                                )
+                            }
+
+                            if (isProxyAuthEnabled) {
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                OutlinedTextField(
+                                    value = proxyUsername,
+                                    onValueChange = { user ->
+                                        proxyUsername = user
+                                        prefs.edit().putString("taildrive_proxy_username", user).commit()
+                                        triggerServiceSettingsUpdate(context)
+                                    },
+                                    label = { Text(stringResource(R.string.taildrive_username)) },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                OutlinedTextField(
+                                    value = proxyPassword,
+                                    onValueChange = { pass ->
+                                        proxyPassword = pass
+                                        prefs.edit().putString("taildrive_proxy_password", pass).commit()
+                                        triggerServiceSettingsUpdate(context)
+                                    },
+                                    label = { Text(stringResource(R.string.taildrive_password)) },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // Copyable URL Card
+                            val formattedUrl = remember(proxyIp, proxyPort, isProxyAuthEnabled, proxyUsername, proxyPassword) {
+                                if (isProxyAuthEnabled && proxyUsername.isNotEmpty() && proxyPassword.isNotEmpty()) {
+                                    "http://$proxyUsername:$proxyPassword@$proxyIp:$proxyPort"
+                                } else {
+                                    "http://$proxyIp:$proxyPort"
+                                }
+                            }
+
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    Alignment.CenterVertically
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.ContentCopy,
-                                        contentDescription = stringResource(R.string.action_copy),
-                                        tint = MaterialTheme.colorScheme.onSecondaryContainer
-                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(stringResource(R.string.taildrive_webdav_url_title), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = formattedUrl,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                            val clip = android.content.ClipData.newPlainText("WebDAV URL", formattedUrl)
+                                            clipboard.setPrimaryClip(clip)
+                                            Toast.makeText(context, context.getString(R.string.taildrive_copied_url), Toast.LENGTH_SHORT).show()
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ContentCopy,
+                                            contentDescription = stringResource(R.string.action_copy),
+                                            tint = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -432,69 +559,70 @@ fun TaildriveScreen(onBack: () -> Unit) {
                 }
             }
 
-            Text(stringResource(R.string.taildrive_shared_folders), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            item {
+                Text(stringResource(R.string.taildrive_shared_folders), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            }
 
             if (!isEnabled) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(stringResource(R.string.taildrive_disabled_msg), color = MaterialTheme.colorScheme.outline)
+                item {
+                    Box(Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                        Text(stringResource(R.string.taildrive_disabled_msg), color = MaterialTheme.colorScheme.outline)
+                    }
                 }
             } else if (shares.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                        Text(stringResource(R.string.taildrive_empty_shares), color = MaterialTheme.colorScheme.outline)
-                        Spacer(Modifier.height(8.dp))
-                        TextButton(onClick = {
-                            dirPickerLauncher.launch(null)
-                        }) {
-                            Text(stringResource(R.string.taildrive_share_a_folder))
+                item {
+                    Box(Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                            Text(stringResource(R.string.taildrive_empty_shares), color = MaterialTheme.colorScheme.outline)
+                            Spacer(Modifier.height(8.dp))
+                            TextButton(onClick = {
+                                dirPickerLauncher.launch(null)
+                            }) {
+                                Text(stringResource(R.string.taildrive_share_a_folder))
+                            }
                         }
                     }
                 }
             } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(shares) { share ->
-                        Card(
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth()
+                items(shares) { share ->
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(share.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyLarge)
-                                    Text(share.path, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                                Row {
-                                    IconButton(onClick = {
-                                        showEditShareDialog(share) { updatedShare ->
-                                            val index = shares.indexOf(share)
-                                            if (index != -1) {
-                                                if (shares.any { it != share && it.name.lowercase() == updatedShare.name.lowercase() }) {
-                                                    Toast.makeText(context, context.getString(R.string.taildrive_err_name_exists), Toast.LENGTH_SHORT).show()
-                                                } else {
-                                                    shares[index] = updatedShare
-                                                    saveShares(prefs, shares)
-                                                    triggerServiceSettingsUpdate(context)
-                                                }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(share.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyLarge)
+                                Text(share.path, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Row {
+                                IconButton(onClick = {
+                                    showEditShareDialog(share) { updatedShare ->
+                                        val index = shares.indexOf(share)
+                                        if (index != -1) {
+                                            if (shares.any { it != share && it.name.lowercase() == updatedShare.name.lowercase() }) {
+                                                Toast.makeText(context, context.getString(R.string.taildrive_err_name_exists), Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                shares[index] = updatedShare
+                                                saveShares(prefs, shares)
+                                                triggerServiceSettingsUpdate(context)
                                             }
                                         }
-                                    }) {
-                                        Icon(Icons.Default.Edit, stringResource(R.string.action_edit), tint = MaterialTheme.colorScheme.primary)
                                     }
-                                    IconButton(onClick = {
-                                        shares.remove(share)
-                                        saveShares(prefs, shares)
-                                        triggerServiceSettingsUpdate(context)
-                                    }) {
-                                        Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = MaterialTheme.colorScheme.error)
-                                    }
+                                }) {
+                                    Icon(Icons.Default.Edit, stringResource(R.string.action_edit), tint = MaterialTheme.colorScheme.primary)
+                                }
+                                IconButton(onClick = {
+                                    shares.remove(share)
+                                    saveShares(prefs, shares)
+                                    triggerServiceSettingsUpdate(context)
+                                }) {
+                                    Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = MaterialTheme.colorScheme.error)
                                 }
                             }
                         }
@@ -562,6 +690,50 @@ fun TaildriveScreen(onBack: () -> Unit) {
             )
         }
     }
+
+    if (onBack != null) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(stringResource(R.string.taildrive_title))
+                            Text(activeAccount.name, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.back))
+                        }
+                    }
+                )
+            },
+            floatingActionButton = {
+                if (isEnabled && hasStoragePermission) {
+                    FloatingActionButton(onClick = { showChoiceDialog = true }) {
+                        Icon(Icons.Default.Add, stringResource(R.string.taildrive_cd_add))
+                    }
+                }
+            }
+        ) { padding ->
+            mainContent(padding)
+        }
+    } else {
+        Box(modifier = Modifier.fillMaxSize()) {
+            mainContent(PaddingValues(0.dp))
+            if (isEnabled && hasStoragePermission) {
+                FloatingActionButton(
+                    onClick = { showChoiceDialog = true },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp)
+                ) {
+                    Icon(Icons.Default.Add, stringResource(R.string.taildrive_cd_add))
+                }
+            }
+        }
+    }
+}
 }
 
 private fun checkStoragePermission(context: Context): Boolean {

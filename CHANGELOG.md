@@ -2,6 +2,183 @@
 
 All notable changes to the TailSocks project will be documented in this file. This project follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) standard.
 
+## [3.5.4] - 2026-08-13
+
+### Fixed
+- Fixed text alignment and vertical clipping in search and input fields across screens and dialogs with single-line nowrap layout and compact sizing.
+- Modernized borders of device name and Split Routes info blocks on the DNS page using rounded corners (8.dp).
+- Fixed DNS server latency testing to perform real end-to-end network resolution.
+- Restored native Back-to-Home minimize animation on the main dashboard screen.
+
+## [3.5.3] - 2026-08-13
+
+### Added
+- Added built-in local DNS server health test with latency measurement.
+
+### Changed
+- Re-designed and modernized the DNS page with premium status cards.
+- Delegated back gestures to standard system-native transitions, resolving UI freezes and revealing the actual previous screen.
+- Reduced the height and padding of search input fields across the entire application.
+- Simplified Serve and Funnel rules page by removing the logs tab and log polling background loop.
+- Added automatic configuration refresh on opening Serve and Funnel screens.
+
+## [3.5.2] - 2026-08-13
+
+### Fixed
+- Fixed settings full backup and restore permission denied issues when Root Mode is active.
+
+## [3.5.1] - 2026-08-13
+
+### Fixed
+- Fixed compilation errors in Go core when building under Android targets with Tailscale v1.102.1.
+
+## [3.5.0] - 2026-08-13
+
+### Added
+- **Settings Restructuring**: Reorganized settings tabs into an intuitive flow (`App`, `Network`, `TS-Core`, `Root Mode`, `DPI Bypass`, `Profile`), grouping TUN and proxy controls under Network, and service advertisements under TS-Core.
+- **Root TUN Migration**: Enabling Root Mode while TUN mode is active automatically migrates the connection to native Linux kernel TUN (`tailscale0`).
+
+### Fixed
+- **Root Mode Native TUN (`tailscale0`)**: Enabled Linux kernel router support in Go core, allowing Root Mode to create native `tailscale0` network interfaces without occupying Android VPN slot (`tun0`).
+- **Root Mode SELinux Sockets**: Fixed a crash/timeout issue on physical Android devices where SELinux Enforcing mode blocked connection between the app interface and the Root daemon socket.
+- **Root Mode System-Wide DNS & Loop Bypass**: Fixed a critical DNS loop issue where native daemon requests to Split DNS servers inside the Tailnet (like custom DNS servers) were recursively hijacked by our own system-wide DNS redirection rules, causing DNS timeouts and queue blocks. Added explicit routing bypass for the CGNAT IP range (`100.64.0.0/10`) to allow direct resolution.
+- **Root Mode Deferral of DNS Interception**: Deferred system-wide DNS redirection until the daemon reaches a fully authenticated `Running` state, resolving `err name not resolved` issues in the browser when attempting to log in on startup.
+- **Root Mode IPTables Cleanups**: Fixed accumulation of duplicate iptables rules by ensuring aggressive cleaning loops run on every service state transition.
+
+
+
+## [3.4.0] - 2026-08-13
+
+
+### Added
+- **Predictive Back Gestures**: Added smooth predictive back animations across all app screens.
+- **Modern Segmented Control & Navigation**: Redesigned tab selectors and chips with smooth sliding animations and log category color coding.
+- **TailFiles & Taildrive Upgrades**: Reorganized Files screen into clean sub-tabs with swipe gestures, and added full storage sharing and folder selector options for Taildrive.
+- **Internal HTTP Proxy Master Toggle**: Added a master switch in settings to easily enable or disable the internal HTTP proxy.
+- **Onboarding & Proxy Improvements**: Added port randomizer buttons, proxy authentication settings, and automatic hostname generation.
+- **Uninstall Data Retention**: Added support for preserving user settings and profile data when uninstalling the app on supported Android versions.
+- **Netcheck Controls**: Added a direct service start button when the daemon is stopped.
+
+### Fixed
+- **Root Mode Stability & Fixes**: Fixed Root authentication, resolved WSA startup ANR freezes, ensured smooth transition to Running state, included Root logs in log exports, auto-restarted daemon on mode toggle, and automatically cleaned up autostart scripts when Root mode is disabled.
+- **Taildrive WebDAV Proxy**: Fixed WebDAV proxy connection errors when sharing drives.
+- **UI & Layout Fixes**: Fixed text truncation and layout overflow in DNS lookup fields.
+- **Localization**: Fully restored Russian translation coverage across all new screens and features.
+- **Log Noise Reduction**: Demoted repetitive background status logs to reduce log spam.
+
+## [3.3.0] - 2026-08-11
+
+### Added
+- **Android AppFunctions API Support (On-Device AI Agent Integration for Gemini)**:
+  - Integrated `androidx.appfunctions:1.0.0-alpha10` with KSP compiler (`com.google.devtools.ksp:2.2.21-2.0.4`) to expose TailSocks tools to Android 16+ on-device AI assistants.
+  - Implemented `TailSocksFunctions` providing `@AppFunction` entry points: `getStatus`, `getAvailableExitNodes`, `getTailnetPeers`, `getAccounts`, `connect`, `disconnect`, `toggle`, `selectExitNode`, `clearExitNode`, `switchAccount`, `setByeDpi`, `setTunMode`, `setAllowLanAccess`, and `setMagicDns`.
+  - Added `TailSocksAppFunctionService` registered in `AndroidManifest.xml` with `BIND_APP_FUNCTION_SERVICE` permission.
+
+### Fixed
+- **App Update Installer Foreground Dialog Fix**:
+  - Replaced legacy `Intent(ACTION_VIEW)` with Android `PackageInstaller.Session` API in `MainActivity.kt` and `Utils.kt`.
+  - Resolves issue where launching an APK update collapsed the app to background without showing the system installation dialog.
+
+## [3.2.0] - 2026-08-11
+
+### Added
+- **New Pure SVG Vector Icons & Adaptive Launcher Icon**:
+  - Refactored app launcher icons to clean modern SVG vectors with adaptive icon support (`ic_launcher_background`, `ic_launcher_foreground`, and `ic_launcher_monochrome` for Android 13+ themed icons).
+  - Added dedicated Quick Settings Tile vector drawable (`ic_qs_tile.xml`) containing only the sock and tail without grid/background for clean rendering on Xiaomi / MIUI / HyperOS and stock Android control panels.
+  - Stored original clean SVG source file and layer SVGs in `assets/icons/`.
+
+## [3.1.8-beta] - 2026-08-06
+
+### Added
+- **Refactored Native Root Mode (`su`)**:
+  - Dual-engine architecture supporting seamless switching between hybrid userspace mode and native system root daemon with direct TUN routing (`tailscale0`).
+  - Autostart boot script for Magisk / KernelSU / APatch (`service.d/tailscaled.sh`) extracted to app assets with dynamic account state directory resolution (`files/states/`).
+  - Atomic Go core patch `12-socket-permissions.patch`: `tailscaled` daemon creates `tailscaled.sock` with `0666` permissions natively on startup without external watcher scripts or `chmod` loops.
+  - Daemon liveness probe via real `LocalSocket` probe (`isDaemonAlive`).
+- **Auto-Update of Root & CLI Scripts on App Upgrade**: Added `MY_PACKAGE_REPLACED` broadcast handler in `BootReceiver` and `AndroidManifest.xml`. Upgrading the TailSocks APK automatically refreshes `service.d/tailscaled.sh` and CLI overlay `/product/bin/tailscale` from updated app assets without user intervention.
+- **Instant Mountable `/product/bin/tailscale` CLI Overlay**: `RootUtils.setTailscaleCliInstalled` mounts the CLI wrapper into `tmpfs` `/product/bin` with SELinux context `u:object_r:system_file:s0` and removes leftover Magisk `disable` flags. The `tailscale` CLI command under `su` works instantly in any shell without rebooting.
+- **Added Root Mode Settings**:
+  - Dedicated Root Mode settings tab (EXPERIMENTAL).
+  - Script path display, "Reinstall Autostart", and "Clear Logs" action buttons.
+  - Automatic root daemon log rotation on startup (>2 MB → retains last 500 lines).
+
+### Fixed
+- **Taildrive Layout & Scrolling**: Refactored `TaildriveActivity` layout to a single `LazyColumn`. Fixed a bug where expanding the Taildrive Proxy settings card covered the shared folders list and blocked vertical scrolling down.
+- **Unified IPN Bus, Core & DNS Architecture**:
+  - Extracted IPN Bus streaming listener into dedicated `appctr/bus.go` module.
+  - Aggregated network map (`NetMap`), daemon state (`State`), peer nodes, `MagicDNS` domain, and Split DNS routes into thread-safe in-memory `busState`.
+  - Eliminated HTTP polling spam to `/localapi/v0/status`: `GetBackendState()` and `GetSelfDNSName()` read state directly from `busState` without network requests.
+  - Implemented exponential backoff (`2s -> 4s -> 8s -> max 30s`) in `IPNBusListener` for transient daemon restarts.
+  - Removed dead `dnsCache` and redundant `syncNetMapFromBus()` extra HTTP stream.
+  - Fixed `State` field type (`*int`) and `BusHealth.Warnings` schema (`map[string]struct` per Tailscale core `health.State` spec).
+  - Added direct fallback querying of `/localapi/v0/dns-config` in `GetDnsStatusJSON()` to load splits before receiving the first `NetMap`.
+  - Fixed handling of Split DNS routes with empty resolver lists (mapped to `100.100.100.100` MagicDNS).
+  - Removed redundant DNS cache reset on Refresh button press in `DnsActivity.kt`.
+- **WSA & Outbound Proxy DNS Fixes**:
+  - Implemented `TS_STATIC_HOSTS` override and pre-resolution of Outbound Proxy domain to IP via direct UDP DNS (`1.1.1.1`): resolves Outbound Proxy DNS deadlock on Android/WSA while preserving original TLS SNI.
+  - Exported `TS_DNS_FALLBACK="1.1.1.1,8.8.8.8"` for reliable external daemon DNS queries.
+
+## [3.1.7] - 2026-08-05
+### Added
+- **Tailscale Core Upgrade (`v1.102.1`)**: Updated `tailscaled` daemon core to Tailscale `v1.102.1` across all 4 native architectures (`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`) with atomic Go bridge patches.
+- **Glance DataStore Widgets**:
+  - **Service Toggle Widget (2×2)**: Compact Material 3 card displaying profile name, status (`● Running` / `○ Stopped`), active Exit Node IP, and instant ON/OFF toggle.
+  - **Vertical Exit Node Selector Widget (2×3 / 2×4)**: Dynamic list of available Exit Nodes with one-tap switching and `● Direct / Off` routing control.
+  - **Refresh Button (`↻`)**: Manual header control for instant background daemon status and netmap synchronization.
+- **MIUI & HyperOS Widget Picker Previews**: Added RemoteViews XML preview layouts (`widget_preview_service.xml`, `widget_preview_exit_node.xml`) using compliant `<FrameLayout>` weight spacers to ensure accurate widget picker previews on Xiaomi HyperOS and MIUI launchers.
+
+### Fixed
+- **Sub-30ms Reactive Widget State**: Configured widget action callbacks to update Glance DataStore (`currentState<Preferences>()`) first before disk I/O, delivering instant reactive button feedback.
+- **Exit Node Double-Selection Bug**: Fixed selection logic matching by enforcing strict primary IP verification (`node.ip == exitNodeIp`).
+- **Persistent Exit Node Caching**: Added persistent accumulation of discovered exit nodes to prevent temporary list loss during daemon startup or netmap sync.
+
+## [3.1.6] - 2026-07-25
+### Fixed
+- Fixed in-app APK auto-updater requesting root permissions on rooted devices by explicitly targeting the system `PackageInstaller` (`com.google.android.packageinstaller` / `com.android.packageinstaller`), bypassing third-party root package manager intent interceptors.
+- Added APK update caching and download verification: prevents re-downloading already cached valid APKs for the target release version, cleans incomplete `.tmp` files on network error, and validates downloaded package integrity before launching installation.
+
+## [3.1.5] - 2026-07-25
+### Added
+- Added **Admin API Control Server Proxy Auto-Resolution**: Admin API requests (`api.tailscale.com`) now automatically inherit the active Control Server Proxy (CP Proxy / ByeDpi / HTTP / SOCKS5) by default (`CONTROL_PLANE` mode) to prevent `403 Forbidden` and blocked DNS errors in restricted regions.
+- Migrated **Admin API HTTP Engine to OkHttp**: Refactored `TailscaleApiClient` to `OkHttpClient` with pre-emptive HTTP `Proxy-Authorization` headers, SOCKS5 authentication, and automatic connection fallback.
+- Added **Haptic Feedback**: Integrated tactile vibration responses (`HapticFeedbackType.LongPress`) across UI long-press interactions (account cards, console presets).
+- Implemented **Daemon Readiness Checkpoint**: Added explicit `waitForDaemonReady()` check before initializing auxiliary services (Taildrive, Tags, Routes, TUN mode) to prevent startup race conditions.
+- Updated **Tailscale Core**: Bumped Tailscale core to official release **`v1.98.9`** across all 4 architectures with host Go toolchain compatibility fixes.
+- Added **In-App Updater**: Integrated direct APK updater and downloader with progress UI, ABI-aware release asset parsing, and `FileProvider` package installer.
+- Added **Russian Documentation Localization**: Created complete Russian documentation for `readme`, `ARCHITECTURE`, `AUTOMATION`, `BUILDING`, `SERVE_FUNNEL_GUIDE`, `ADGUARD`, and `ROADMAP`.
+
+### Fixed
+- Fixed `unexpected end of stream` errors on HTTP/HTTPS proxies with authentication by sending pre-emptive `Proxy-Authorization` headers on CONNECT requests.
+- Preserved active login sessions across daemon restarts and account switches by avoiding redundant LocalAPI login mutations on authenticated profiles.
+- Fixed Headscale/ControlURL authorization routing during unauthenticated session initialization.
+- Updated developer credits in About dialog (App Developer & Patch Developer: Bropines, Anet Patch: Asutorufa).
+
+## [3.1.4] - 2026-07-24
+### Added
+- Added **Native Root Mode (`su`)**: Supports running Tailscale daemon with root privileges for direct TUN routing and Magisk/KernelSU autostart service.
+- Created **Go LocalAPI SDK (`appctr/api.go`)**: Added a strongly-typed `LocalClient` struct covering 100% of LocalAPI v0 endpoints and migrated all Go subsystems (`auth`, `drive`, `taildrop`, `status`) to it.
+- Created **Kotlin LocalAPI Clients**: Implemented `LocalApiClient.kt` (direct Unix `LocalSocket`) and `KotlinGoApiClient.kt` (JNI bridge).
+- Redesigned **Account Picker UI**: Long-pressing account cards smoothly reveals inline **Rename** and **Delete** actions in 100% full-width layout. Fixed navigation bar padding and sheet height (`skipPartiallyExpanded = true`).
+
+### Fixed
+- Fixed Headscale/ControlURL authorization routing during unauthenticated session initialization.
+- Preserved active login sessions across account switches and daemon restarts by avoiding redundant LocalAPI login mutations on already authenticated profiles.
+- Enforced per-account preference isolation (`appctr_${id}`) for Exit Node selections.
+- Added custom login server input field directly to the Add Account dialog.
+
+## [3.1.3] - 2026-07-22
+### Added
+- Added `TaskerReceiver` and Broadcast Intent filters (`CONNECT`, `DISCONNECT`, `TOGGLE`, `RESTART`, `GET_STATUS`, `SET_EXIT_NODE`, `SWITCH_ACCOUNT`, `SET_BYEDPI`, `SET_TUN`) to enable Tasker, MacroDroid, and third-party background automation integration.
+- Added Tasker & Automation Security settings card under Settings with master enable switch and optional security secret token authentication (`secret` parameter validation).
+- Implemented real-time status event broadcasting (`io.github.bropines.tailscaled.STATUS_CHANGED`) providing `running`, `status`, `account`, `exit_node`, `tun_enabled`, and `byedpi_enabled` metrics for automation listeners.
+- Created comprehensive Tasker and MacroDroid automation guide in `docs/AUTOMATION.md`.
+
+## [3.1.2] - 2026-07-02
+### Changed
+- Replaced app launcher icon with a new optimized design (reduced SVG size by 33%).
+- Updated adaptive icon background and foreground layers.
+- Preserved the old logo assets in the repository files.
+
 ## [3.1.1] - 2026-06-11
 ### Security
 - Fixed a partial path validation bypass vulnerability in `TailsocksFileProvider` by enforcing trailing slash validation on parent directories during child document validation.
