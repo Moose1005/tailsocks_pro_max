@@ -105,9 +105,16 @@ class TailscaledService : Service() {
         try { connectivityManager.registerDefaultNetworkCallback(networkCallback) } catch (e: Exception) {}
     }
 
+    // Set by the InviZible Pro Max bridge START to force SOCKS-only operation (no TUN VPN),
+    // so TailSocks never grabs the system VpnService slot that InviZible owns. See audit HIGH #3.
+    @Volatile private var bridgeSocksOnly = false
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
-        
+        if (intent?.getBooleanExtra(InviZibleBridgeReceiver.EXTRA_BRIDGE_SOCKS_ONLY, false) == true) {
+            bridgeSocksOnly = true
+        }
+
         if (action == "STOP_ACTION") {
             val notificationText = "Stopping..."
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -171,6 +178,7 @@ class TailscaledService : Service() {
         }
 
         ProxyState.setUserState(this, true)
+        InviZibleBridgeReceiver.broadcastStatus(this, true)
         updateTile()
         if (!Appctr.isRunning()) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -194,8 +202,19 @@ class TailscaledService : Service() {
                 startForeground(1, buildNotification("Active"))
             }
             updateNotification("Active")
+
+            // audit HIGH #3 — gap found 2026-08-13. A bridge START aimed at an ALREADY-RUNNING
+            // TailSocks short-circuits to this branch, so startTailscale() never runs and the
+            // SOCKS-only request read at the top of onStartCommand was silently dropped. TUN
+            // stayed up holding the system VpnService slot InviZible needs, which is exactly the
+            // seizure #3 exists to prevent — previously survived only because InviZible happened
+            // to claim the slot first, which is ordering luck rather than design.
+            // stopTunMode() only posts an Intent, so it is safe to call on the main thread here.
+            if (bridgeSocksOnly) {
+                stopTunMode()
+            }
         }
-        
+
         refreshHandler.removeCallbacks(refreshRunnable)
         refreshHandler.postDelayed(refreshRunnable, 1000)
         return START_STICKY
@@ -219,12 +238,17 @@ class TailscaledService : Service() {
                 applyTagsAndRoutes(this@TailscaledService)
                 applyTaildrive(this@TailscaledService)
                 
-                if (GlobalSettings.isTunModeEnabled(this@TailscaledService)) {
+                // When started by the InviZible Pro Max bridge, force SOCKS-only: InviZible owns
+                // the system VpnService slot, and TailSocks' TUN mode would seize it (audit HIGH #3),
+                // revoking InviZible's tunnel and risking direct egress of all traffic.
+                if (bridgeSocksOnly) {
+                    stopTunMode()
+                } else if (GlobalSettings.isTunModeEnabled(this@TailscaledService)) {
                     startTunMode()
                 }
-            } catch (e: Exception) { 
+            } catch (e: Exception) {
                 Log.e(TAG, "Start failed", e)
-                stopMe() 
+                stopMe()
             }
         }.start()
     }
@@ -326,6 +350,7 @@ class TailscaledService : Service() {
     private fun stopMe() {
         stopTunMode()
         ProxyState.setUserState(this, false)
+        InviZibleBridgeReceiver.broadcastStatus(this, false)
         refreshHandler.removeCallbacks(refreshRunnable)
         try { Appctr.stopDriveServer() } catch (e: Exception) {}
         try { Appctr.stopDriveProxy() } catch (e: Exception) {}

@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings. core.autocrlf=true on this Windows box would otherwise
+# hand out CRLF copies on checkout, which bash rejects with "\r: command not found" — and the
+# appctr build scripts are the ones that took a full session to get working against the NDK.
+*.sh text eol=lf

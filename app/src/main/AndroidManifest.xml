@@ -11,6 +11,13 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+    <!-- InviZible Pro Max bridge. Declared here too so the exported TailscaledService's
+         permission resolves even if TailSocks is installed first. Signature-level: only a
+         same-key app (our InviZible Pro Max) can start the service or receive status. -->
+    <permission
+        android:name="pan.alexander.tordnscrypt.BRIDGE_PERMISSION"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="pan.alexander.tordnscrypt.BRIDGE_PERMISSION" />
     
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
@@ -72,7 +79,10 @@
             </intent-filter>
         </activity>
 
-        <service android:name=".core.TailscaledService" android:directBootAware="true" android:exported="false" android:foregroundServiceType="specialUse">
+        <!-- exported + signature-permission so InviZible Pro Max (same signing key) can start/stop
+             it directly from its foreground context. Same-UID (TailSocks' own) callers are exempt
+             from the permission check, so standalone use is unaffected. -->
+        <service android:name=".core.TailscaledService" android:directBootAware="true" android:exported="true" android:permission="pan.alexander.tordnscrypt.BRIDGE_PERMISSION" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="tailscale node service" />
         </service>
 
@@ -103,6 +113,7 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+
 
         <receiver android:name=".core.BootReceiver" android:enabled="true" android:exported="false">
             <intent-filter>

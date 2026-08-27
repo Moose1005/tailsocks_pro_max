@@ -259,6 +259,7 @@ cd ..
 | [Build Instructions](docs/BUILDING.md) | NDK setup, Go core compilation, dynamic patch pipeline |
 | [Project Retrospective](docs/RETROSPECTIVE.md) | Evolution from PoC to the current architecture |
 | [AdGuard Setup](docs/ADGUARD.md) | Coexistence with system-wide ad blockers |
+| [InviZible Pro Setup](docs/INVIZIBLE.md) | Coexistence with DNSCrypt + Tor (InviZible Pro) |
 | [Serve & Funnel Guide](docs/SERVE_FUNNEL_GUIDE.md) | Exposing local ports and virtual services |
 | [Roadmap](docs/ROADMAP.md) | Planned features and short-term goals |
 | [Changelog](CHANGELOG.md) | Full version history |
