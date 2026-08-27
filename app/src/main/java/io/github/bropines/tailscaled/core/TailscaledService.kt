@@ -178,7 +178,14 @@ class TailscaledService : Service() {
         }
 
         ProxyState.setUserState(this, true)
-        InviZibleBridgeReceiver.broadcastStatus(this, true)
+        // audit LOW #19: this used to broadcast running=true right here, synchronously at service
+        // start, while the real bring-up (Appctr.start opening the SOCKS listener and joining the
+        // tailnet) still had to happen on a background thread. InviZible took that as confirmation,
+        // flipped to RUNNING and cancelled its start-timeout, so the UI claimed the tunnel was up
+        // while 127.0.0.1:48115 was not yet serving. Connections failed closed rather than leaked,
+        // but the signal InviZible relies on was simply inaccurate. The confirmation now goes out
+        // from the two places that can honestly make it: after Appctr.start() returns, and in the
+        // already-running branch below.
         updateTile()
         if (!Appctr.isRunning()) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -202,6 +209,9 @@ class TailscaledService : Service() {
                 startForeground(1, buildNotification("Active"))
             }
             updateNotification("Active")
+            // audit LOW #19: this branch is the honest case — Appctr really is running, so
+            // confirming immediately is accurate.
+            InviZibleBridgeReceiver.broadcastStatus(this, true)
 
             // audit HIGH #3 — gap found 2026-08-13. A bridge START aimed at an ALREADY-RUNNING
             // TailSocks short-circuits to this branch, so startTailscale() never runs and the
@@ -233,6 +243,11 @@ class TailscaledService : Service() {
                 Appctr.start(options)
                 updateNotification("Active")
                 applicationContext.sendBroadcast(Intent("START"))
+                // audit LOW #19: confirm to InviZible only now that Appctr.start() has returned
+                // and the SOCKS listener is actually up. If this never arrives, InviZible's
+                // start-timeout fires and rolls its config back (audit #9) — which is the correct
+                // outcome for a start that genuinely failed.
+                InviZibleBridgeReceiver.broadcastStatus(this@TailscaledService, true)
                 
                 try { Thread.sleep(2500) } catch (e: Exception) {}
                 applyTagsAndRoutes(this@TailscaledService)
