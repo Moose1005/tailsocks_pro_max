@@ -187,6 +187,11 @@ class TailscaledService : Service() {
         if (intent?.getBooleanExtra(InviZibleBridgeReceiver.EXTRA_BRIDGE_SOCKS_ONLY, false) == true) {
             bridgeSocksOnly = true
         }
+        // audit #12: record who InviZible says it is, after verifying it is co-signed, so status
+        // can be addressed to it rather than broadcast to whoever holds the permission.
+        intent?.getStringExtra(InviZibleBridgeReceiver.EXTRA_BRIDGE_CLIENT_PACKAGE)?.let {
+            InviZibleBridgeReceiver.rememberClient(this, it)
+        }
 
         if (action == "STOP_ACTION") {
             val notificationText = "Stopping..."
