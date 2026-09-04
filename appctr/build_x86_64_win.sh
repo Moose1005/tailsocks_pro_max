@@ -4,8 +4,8 @@
 set -e
 set -o pipefail
 
-export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-C:/Android/Sdk/ndk/23.1.7779620}"
-export PATH="$USERPROFILE/go/bin:$PATH"
+export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-K:/dev/Android/Sdk/ndk/23.1.7779620}"
+export PATH="K:/dev/go/bin:$PATH"
 
 TS_VERSION="v1.98.3"
 NDK_BIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/windows-x86_64/bin"
