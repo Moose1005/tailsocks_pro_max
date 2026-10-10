@@ -17,7 +17,7 @@ if [ -z "$ANDROID_HOME" ]; then
     exit 1
 fi
 # Forward slashes: the NDK clang .cmd wrapper is invoked through NDK_BIN below, and a Windows
-# env value like K:\dev\Android\Sdk would otherwise produce a mixed-separator path.
+# env value like C:\Android\Sdk would otherwise produce a mixed-separator path.
 export ANDROID_HOME="${ANDROID_HOME//\\//}"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 # Pinned to match ndkVersion in app/build.gradle.kts.
