@@ -4,8 +4,41 @@
 set -e
 set -o pipefail
 
-export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-K:/dev/Android/Sdk/ndk/23.1.7779620}"
-export PATH="K:/dev/go/bin:$PATH"
+# --- Toolchain environment ---------------------------------------------------------------
+# Nothing machine-specific: everything derives from ANDROID_HOME / ANDROID_SDK_ROOT and `go env`,
+# so this runs on any Windows box with the toolchain installed. (On Linux, use upstream build.sh.)
+#
+# gomobile resolves the SDK via ANDROID_HOME, not ANDROID_NDK_HOME. Without it, it falls back to
+# a default path and fails with "failed to find android SDK platform", leaving a truncated
+# appctr.aar that Gradle only reports much later as "invalid block type".
+export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+if [ -z "$ANDROID_HOME" ]; then
+    echo "ERROR: set ANDROID_HOME (or ANDROID_SDK_ROOT) to your Android SDK" >&2
+    exit 1
+fi
+# Forward slashes: the NDK clang .cmd wrapper is invoked through NDK_BIN below, and a Windows
+# env value like K:\dev\Android\Sdk would otherwise produce a mixed-separator path.
+export ANDROID_HOME="${ANDROID_HOME//\\//}"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+# Pinned to match ndkVersion in app/build.gradle.kts.
+export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/23.1.7779620}"
+export ANDROID_NDK_HOME="${ANDROID_NDK_HOME//\\//}"
+if [ ! -d "$ANDROID_NDK_HOME" ]; then
+    echo "ERROR: NDK not found at $ANDROID_NDK_HOME (install ndk;23.1.7779620)" >&2
+    exit 1
+fi
+
+# TMP must use Windows separators: Go creates $WORK beneath it and passes those paths to the NDK
+# clang .cmd batch wrapper, which mishandles forward slashes and makes cgo emit an object file it
+# then cannot parse ("cannot parse $WORK\...\_cgo_.o as ELF").
+if [ -n "${TMP:-}" ]; then export TMP="${TMP//\//\\}"; export TEMP="$TMP"; fi
+
+# gomobile and gobind live in GOPATH/bin, wherever GOPATH is on this machine.
+command -v go >/dev/null 2>&1 || { echo "ERROR: go is not on PATH" >&2; exit 1; }
+GOBIN_DIR="$(go env GOPATH)/bin"
+command -v cygpath >/dev/null 2>&1 && GOBIN_DIR="$(cygpath -u "$GOBIN_DIR")"
+export PATH="$GOBIN_DIR:$PATH"
+# ------------------------------------------------------------------------------------------
 
 TS_VERSION="v1.98.3"
 NDK_BIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/windows-x86_64/bin"
